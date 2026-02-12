@@ -1,0 +1,60 @@
+MODULE main
+VAR
+     a : 0 .. 10;
+     b : 0 .. 10;
+     prod : 0 .. 100;
+     --prod : 0 .. 50; -- try as not large enough range
+     pc : {l0, l1, l2, l3};
+     
+-- full multiply by repeated summation:
+-- prod = 0
+-- l0: while a > 0
+-- l1:    prod += b
+-- l2:    a -= 1
+-- l3: done
+     
+ASSIGN
+     init(prod) := 0;
+     init(pc) := l0;
+     
+     next(pc) := 
+     	case
+     		pc = l0 & a > 0 : l1;
+     		pc = l0 & a <= 0 : l3;
+     		pc = l1 : l2;
+     		pc = l2 : l0;
+     		pc = l3 : l3; -- infinite loop
+     		TRUE : pc;
+     	esac;
+     
+     next(prod) :=
+	case
+		pc = l1 : prod + b;
+		TRUE : prod;
+	esac;
+	
+     next(a) := 
+	case
+		pc = l2 & a > 0 : a - 1;
+		TRUE : a;
+	esac;
+     next(b) := b;
+
+-- Invariants: variables stay in range
+INVARSPEC (a >= 0) & (a <= 10)
+INVARSPEC (b >= 0) & (b <= 10)
+
+-- CTL specs: eventually product is computed
+CTLSPEC AG ((prod = -1) -> AF (prod != -1))
+CTLSPEC AG ((a = 0) -> AF (prod = 0))
+
+LTLSPEC (a = 2 & b = 3) -> F (prod = 6);
+
+LTLSPEC (a = 5 & b = 5) -> F (prod = 25);
+
+-- error
+LTLSPEC (a = 4 & b = 5) -> F (prod = 25);
+
+LTLSPEC F G prod = a * b;
+
+LTLSPEC G F prod = a * b;

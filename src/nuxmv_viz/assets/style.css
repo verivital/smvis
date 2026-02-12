@@ -1,0 +1,59 @@
+/* nuXmv Model Visualizer - Dashboard Styles */
+
+body {
+    margin: 0;
+    padding: 0;
+    background-color: #f5f6fa;
+}
+
+h2 {
+    font-weight: 600;
+}
+
+h4 {
+    font-size: 14px;
+    font-weight: 600;
+    color: #2c3e50;
+    margin-bottom: 8px;
+}
+
+h5 {
+    font-size: 13px;
+    font-weight: 600;
+    color: #34495e;
+}
+
+h6 {
+    font-size: 12px;
+    font-weight: 600;
+    color: #555;
+}
+
+hr {
+    border: none;
+    border-top: 1px solid #ddd;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+    width: 6px;
+}
+::-webkit-scrollbar-track {
+    background: #f1f1f1;
+}
+::-webkit-scrollbar-thumb {
+    background: #aaa;
+    border-radius: 3px;
+}
+
+/* Button hover effects */
+button:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+    transition: all 0.1s;
+}
+
+/* Dropdown styling */
+.Select-control {
+    font-size: 12px !important;
+}
