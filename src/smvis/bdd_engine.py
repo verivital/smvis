@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 import dd.autoref as _bdd
-from nuxmv_viz.smv_model import SmvModel, VarDecl, BoolType, EnumType, RangeType, get_domain
+from smvis.smv_model import SmvModel, VarDecl, BoolType, EnumType, RangeType, get_domain
 
 
 @dataclass

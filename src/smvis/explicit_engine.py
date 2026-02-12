@@ -3,7 +3,7 @@ from __future__ import annotations
 import itertools
 from collections import deque
 from dataclasses import dataclass, field
-from nuxmv_viz.smv_model import (
+from smvis.smv_model import (
     SmvModel, VarDecl, BoolType, EnumType, RangeType,
     Expr, IntLit, BoolLit, VarRef, NextRef, BinOp, UnaryOp,
     CaseExpr, SetExpr, get_domain,

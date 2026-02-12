@@ -1,6 +1,6 @@
 """BDD visualization helpers - convert BDD structure to displayable info."""
 from __future__ import annotations
-from nuxmv_viz.bdd_engine import BddResult
+from smvis.bdd_engine import BddResult
 
 
 def get_bdd_summary(result: BddResult) -> dict:

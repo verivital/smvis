@@ -1,7 +1,7 @@
-"""Entry point: python -m nuxmv_viz"""
+"""Entry point: python -m smvis"""
 import sys
 import webbrowser
-from nuxmv_viz.app import create_app
+from smvis.app import create_app
 
 
 def main():

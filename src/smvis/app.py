@@ -8,12 +8,12 @@ import dash
 from dash import html, dcc, callback, Input, Output, State, no_update
 import dash_cytoscape as cyto
 
-from nuxmv_viz.smv_parser import parse_smv
-from nuxmv_viz.smv_model import SmvModel, get_domain, expr_to_str
-from nuxmv_viz.explicit_engine import explore, ExplicitResult
-from nuxmv_viz.bdd_engine import build_from_explicit, BddResult, get_bdd_structure
-from nuxmv_viz.graph_builder import build_elements, CYTO_STYLESHEET, BDD_STYLESHEET, get_state_detail
-from nuxmv_viz.bdd_visualizer import get_bdd_summary
+from smvis.smv_parser import parse_smv
+from smvis.smv_model import SmvModel, get_domain, expr_to_str
+from smvis.explicit_engine import explore, ExplicitResult
+from smvis.bdd_engine import build_from_explicit, BddResult, get_bdd_structure
+from smvis.graph_builder import build_elements, CYTO_STYLESHEET, BDD_STYLESHEET, get_state_detail
+from smvis.bdd_visualizer import get_bdd_summary
 
 # Path to bundled .smv model files (smvis/examples/)
 _MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "examples")
@@ -171,7 +171,24 @@ def create_app() -> dash.Dash:
                         "backgroundColor": "#f8f9fa", "marginTop": "4px",
                         "minHeight": "20px",
                     }),
-                ], style={"marginBottom": "12px"}),
+                    # Hover tooltip (positioned absolutely via clientside callback)
+                    html.Div(id="hover-tooltip", style={
+                        "display": "none",
+                        "position": "fixed",
+                        "backgroundColor": "rgba(44, 62, 80, 0.95)",
+                        "color": "#ecf0f1",
+                        "padding": "10px 14px",
+                        "borderRadius": "6px",
+                        "fontSize": "14px",
+                        "fontFamily": "Consolas, monospace",
+                        "lineHeight": "1.6",
+                        "pointerEvents": "none",
+                        "zIndex": "9999",
+                        "boxShadow": "0 4px 12px rgba(0,0,0,0.3)",
+                        "maxWidth": "400px",
+                        "whiteSpace": "pre-line",
+                    }),
+                ], style={"marginBottom": "12px", "position": "relative"}),
 
                 # BDD Section
                 html.Div([
@@ -421,6 +438,69 @@ def create_app() -> dash.Dash:
             return f"Node: {node_data.get('label', '?')}"
         except Exception:
             return ""
+
+    # ---- Hover tooltip via clientside callback ----
+    # mouseoverNodeData gives us the node's data dict on hover
+    @app.callback(
+        Output("hover-tooltip", "children"),
+        Output("hover-tooltip", "style"),
+        Input("state-graph", "mouseoverNodeData"),
+        Input("state-graph", "mouseoutNodeData"),
+        State("parsed-model-store", "data"),
+    )
+    def update_hover_tooltip(hover_data, mouseout_data, model_data):
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            return no_update, no_update
+
+        trigger_id = ctx.triggered[0]["prop_id"]
+
+        # Hide tooltip on mouseout
+        if "mouseoutNodeData" in trigger_id or not hover_data:
+            return "", {"display": "none"}
+
+        # Build tooltip content from the node data fields
+        # Node data has variable names as keys (set in graph_builder)
+        var_names = []
+        if model_data and "variables" in model_data:
+            var_names = list(model_data["variables"].keys())
+
+        lines = []
+        for var in var_names:
+            if var in hover_data:
+                lines.append(f"{var} = {hover_data[var]}")
+
+        # Fallback: show all data keys except id/label/depth
+        if not lines:
+            for k, v in hover_data.items():
+                if k not in ("id", "label", "depth"):
+                    lines.append(f"{k} = {v}")
+
+        if not lines:
+            lines.append(hover_data.get("label", "?"))
+
+        # Show tooltip (positioned by CSS near center-right of graph area)
+        tooltip_style = {
+            "display": "block",
+            "position": "fixed",
+            "top": "200px",
+            "right": "40px",
+            "backgroundColor": "rgba(44, 62, 80, 0.95)",
+            "color": "#ecf0f1",
+            "padding": "10px 14px",
+            "borderRadius": "6px",
+            "fontSize": "14px",
+            "fontFamily": "Consolas, monospace",
+            "lineHeight": "1.6",
+            "pointerEvents": "none",
+            "zIndex": "9999",
+            "boxShadow": "0 4px 12px rgba(0,0,0,0.3)",
+            "maxWidth": "400px",
+            "whiteSpace": "pre-line",
+        }
+
+        content = "\n".join(lines)
+        return content, tooltip_style
 
     return app
 

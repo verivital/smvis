@@ -1,6 +1,6 @@
 """Build Cytoscape.js elements from explicit-state exploration results."""
 from __future__ import annotations
-from nuxmv_viz.explicit_engine import ExplicitResult, State
+from smvis.explicit_engine import ExplicitResult, State
 
 
 def build_elements(result: ExplicitResult,

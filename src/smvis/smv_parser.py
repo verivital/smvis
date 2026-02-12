@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os
 from lark import Lark, Transformer, Token
-from nuxmv_viz.smv_model import (
+from smvis.smv_model import (
     SmvModel, VarDecl, BoolType, EnumType, RangeType,
     IntLit, BoolLit, VarRef, NextRef, BinOp, UnaryOp,
     CaseExpr, SetExpr, TemporalUnary, SpecDecl,
