@@ -63,3 +63,25 @@ def format_iteration_log(result: BddResult) -> str:
             f"{it.total_reachable:15d} | {it.bdd_node_count:9d}"
         )
     return "\n".join(lines)
+
+
+def get_reduction_stats(bdd_node, bdd, encoding: dict) -> dict:
+    """Compute BDD reduction statistics comparing full decision tree to ROBDD.
+
+    Returns dict with full_tree_nodes, robdd_nodes, reduction_pct.
+    """
+    n_vars = sum(enc.n_bits for enc in encoding.values())
+    # Full binary decision tree: 2^(n+1) - 1 internal + leaf nodes
+    full_tree_nodes = (2 ** (n_vars + 1)) - 1
+    robdd_nodes = len(bdd_node)
+
+    reduction_pct = 0.0
+    if full_tree_nodes > 0:
+        reduction_pct = (1 - robdd_nodes / full_tree_nodes) * 100
+
+    return {
+        "n_vars": n_vars,
+        "full_tree_nodes": full_tree_nodes,
+        "robdd_nodes": robdd_nodes,
+        "reduction_pct": round(reduction_pct, 1),
+    }

@@ -1,7 +1,9 @@
-"""Dash web application for the nuXmv Model Visualizer."""
+"""Dash web application for the smvis Model Visualizer."""
 from __future__ import annotations
+import hashlib
 import os
 import json
+import logging
 import traceback
 
 import dash
@@ -11,9 +13,34 @@ import dash_cytoscape as cyto
 from smvis.smv_parser import parse_smv
 from smvis.smv_model import SmvModel, get_domain, expr_to_str
 from smvis.explicit_engine import explore, ExplicitResult
-from smvis.bdd_engine import build_from_explicit, BddResult, get_bdd_structure
-from smvis.graph_builder import build_elements, CYTO_STYLESHEET, BDD_STYLESHEET, get_state_detail
-from smvis.bdd_visualizer import get_bdd_summary
+from smvis.bdd_engine import build_from_explicit, BddResult, get_bdd_structure, build_truth_table
+from smvis.graph_builder import (
+    build_elements, compute_concentric_positions,
+    CYTO_STYLESHEET, BDD_STYLESHEET, get_state_detail,
+)
+from smvis.bdd_visualizer import get_bdd_summary, get_reduction_stats
+
+log = logging.getLogger("smvis")
+
+# Result cache keyed by SHA-256 of SMV text to avoid recomputation
+_compute_cache: dict[str, tuple[ExplicitResult, BddResult]] = {}
+_CACHE_MAX = 10
+
+
+def _cache_key(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _get_cached(text: str) -> tuple[ExplicitResult, BddResult] | None:
+    return _compute_cache.get(_cache_key(text))
+
+
+def _put_cached(text: str, explicit: ExplicitResult, bdd: BddResult):
+    key = _cache_key(text)
+    _compute_cache[key] = (explicit, bdd)
+    if len(_compute_cache) > _CACHE_MAX:
+        oldest = next(iter(_compute_cache))
+        del _compute_cache[oldest]
 
 # Path to bundled .smv model files (smvis/examples/)
 _MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "examples")
@@ -47,7 +74,7 @@ def create_app() -> dash.Dash:
     app.layout = html.Div([
         # ---- Header ----
         html.Div([
-            html.H2("nuXmv Model Visualizer", style={"margin": "0", "flex": "1"}),
+            html.H2("smvis", style={"margin": "0", "flex": "1"}),
             html.Div([
                 html.Label("Model:", style={"marginRight": "8px", "fontWeight": "bold"}),
                 dcc.Dropdown(
@@ -119,6 +146,13 @@ def create_app() -> dash.Dash:
                     html.Div([
                         html.H4("Transition System", style={"margin": "0", "flex": "1"}),
                         html.Div([
+                            html.Button("Export PNG", id="btn-export-graph",
+                                        n_clicks=0, style={
+                                            "fontSize": "10px", "padding": "3px 8px",
+                                            "backgroundColor": "#95a5a6", "color": "#fff",
+                                            "border": "none", "borderRadius": "3px",
+                                            "cursor": "pointer", "marginRight": "8px",
+                                        }),
                             dcc.Checklist(
                                 id="graph-options",
                                 options=[{"label": " Reachable only", "value": "reachable_only"}],
@@ -194,15 +228,23 @@ def create_app() -> dash.Dash:
                 html.Div([
                     html.Div([
                         html.H4("BDD Visualization", style={"margin": "0", "flex": "1"}),
+                        html.Button("Export PNG", id="btn-export-bdd",
+                                    n_clicks=0, style={
+                                        "fontSize": "10px", "padding": "3px 8px",
+                                        "backgroundColor": "#95a5a6", "color": "#fff",
+                                        "border": "none", "borderRadius": "3px",
+                                        "cursor": "pointer", "marginRight": "8px",
+                                    }),
                         dcc.Dropdown(
                             id="bdd-selector",
                             options=[
                                 {"label": "Initial States", "value": "init"},
                                 {"label": "Reachable States", "value": "reached"},
                                 {"label": "Transition Relation", "value": "trans"},
+                                {"label": "Domain Constraint", "value": "domain"},
                             ],
                             value="reached",
-                            style={"width": "180px", "fontSize": "12px"},
+                            style={"width": "200px", "fontSize": "12px"},
                             clearable=False,
                         ),
                     ], style={"display": "flex", "justifyContent": "space-between",
@@ -210,8 +252,7 @@ def create_app() -> dash.Dash:
                     html.Div([
                         cyto.Cytoscape(
                             id="bdd-graph",
-                            layout={"name": "breadthfirst", "directed": True,
-                                    "animate": False},
+                            layout={"name": "preset", "animate": False},
                             style={"width": "50%", "height": "250px",
                                    "border": "1px solid #ddd",
                                    "display": "inline-block"},
@@ -263,8 +304,8 @@ def create_app() -> dash.Dash:
         try:
             with open(filepath, "w") as f:
                 f.write(text)
-        except Exception:
-            pass
+        except Exception as e:
+            log.exception("Error saving model to %s", filepath)
         return dcc.send_string(text, name)
 
     @app.callback(
@@ -296,7 +337,9 @@ def create_app() -> dash.Dash:
         Output("stats-panel", "children"),
         Output("state-graph", "elements"),
         Output("bdd-graph", "elements"),
+        Output("bdd-graph", "layout"),
         Output("bdd-info", "children"),
+        Output("bdd-selector", "options"),
         Input("btn-compute", "n_clicks"),
         State("smv-editor", "value"),
         State("graph-options", "value"),
@@ -308,7 +351,7 @@ def create_app() -> dash.Dash:
     )
     def compute_all(n, text, graph_opts, filter_expr, layout, max_nodes, bdd_sel):
         if not n or not text:
-            return (no_update,) * 6
+            return (no_update,) * 8
         try:
             model = parse_smv(text)
             # Explicit exploration
@@ -330,20 +373,37 @@ def create_app() -> dash.Dash:
                 filter_expr=filter_expr or "",
             )
             stats = _build_stats(explicit_result, bdd_result)
-            bdd_summary = get_bdd_summary(bdd_result)
             bdd_elements, bdd_info = _build_bdd_view(bdd_result, bdd_sel or "reached")
+            bdd_layout = {"name": "preset", "animate": False}
+
+            # Build dynamic BDD selector options including iteration views
+            bdd_options = [
+                {"label": "Initial States", "value": "init"},
+                {"label": "Reachable States", "value": "reached"},
+                {"label": "Transition Relation", "value": "trans"},
+                {"label": "Domain Constraint", "value": "domain"},
+            ]
+            for i in range(len(bdd_result.iteration_bdds)):
+                bdd_options.append({
+                    "label": f"Iteration {i}" if i > 0 else "Iteration 0 (Init)",
+                    "value": f"iter_{i}",
+                })
+
+            # Cache results for other callbacks
+            _put_cached(text, explicit_result, bdd_result)
 
             # Serialize for store (lightweight)
             explicit_data = _serialize_explicit(explicit_result)
             bdd_data = {"total_reachable": bdd_result.total_reachable}
 
-            return explicit_data, bdd_data, stats, graph_elements, bdd_elements, bdd_info
+            return (explicit_data, bdd_data, stats, graph_elements,
+                    bdd_elements, bdd_layout, bdd_info, bdd_options)
         except Exception as e:
             err_msg = html.Div([
                 html.Span(f"Error: {e}", style={"color": "#e74c3c"}),
                 html.Pre(traceback.format_exc(), style={"fontSize": "10px"}),
             ])
-            return None, None, err_msg, [], [], str(e)
+            return None, None, err_msg, [], [], no_update, str(e), no_update
 
     @app.callback(
         Output("state-graph", "elements", allow_duplicate=True),
@@ -360,8 +420,12 @@ def create_app() -> dash.Dash:
         if not explicit_data or not text:
             return no_update, no_update
         try:
-            model = parse_smv(text)
-            explicit_result = explore(model)
+            cached = _get_cached(text)
+            if cached:
+                explicit_result, _ = cached
+            else:
+                model = parse_smv(text)
+                explicit_result = explore(model)
             reachable_only = "reachable_only" in (graph_opts or [])
             elements = build_elements(
                 explicit_result,
@@ -376,13 +440,16 @@ def create_app() -> dash.Dash:
             elif layout == "breadthfirst":
                 layout_dict["directed"] = True
             elif layout == "concentric":
-                layout_dict["concentric"] = "function(n) { return n.data('depth') || 0; }"
+                elements = compute_concentric_positions(elements)
+                layout_dict = {"name": "preset", "animate": False}
             return elements, layout_dict
         except Exception:
-            return no_update, no_update
+            log.exception("Error in update_graph callback")
+            return [], {"name": "cose", "animate": False}
 
     @app.callback(
         Output("bdd-graph", "elements", allow_duplicate=True),
+        Output("bdd-graph", "layout", allow_duplicate=True),
         Output("bdd-info", "children", allow_duplicate=True),
         Input("bdd-selector", "value"),
         State("bdd-result-store", "data"),
@@ -392,21 +459,27 @@ def create_app() -> dash.Dash:
     )
     def update_bdd_view(bdd_sel, bdd_data, text, explicit_data):
         if not bdd_data or not text:
-            return no_update, no_update
+            return no_update, no_update, no_update
         try:
-            model = parse_smv(text)
-            explicit_result = explore(model)
-            bdd_result = build_from_explicit(
-                model,
-                explicit_result.initial_states,
-                explicit_result.transitions,
-                explicit_result.var_names,
-                explicit_result.state_to_dict,
-            )
+            cached = _get_cached(text)
+            if cached:
+                _, bdd_result = cached
+            else:
+                model = parse_smv(text)
+                explicit_result = explore(model)
+                bdd_result = build_from_explicit(
+                    model,
+                    explicit_result.initial_states,
+                    explicit_result.transitions,
+                    explicit_result.var_names,
+                    explicit_result.state_to_dict,
+                )
             elements, info = _build_bdd_view(bdd_result, bdd_sel or "reached")
-            return elements, info
-        except Exception:
-            return no_update, no_update
+            bdd_layout = {"name": "preset", "animate": False}
+            return elements, bdd_layout, info
+        except Exception as e:
+            log.exception("Error in update_bdd_view callback")
+            return [], no_update, html.Span(f"Error: {e}", style={"color": "#e74c3c"})
 
     @app.callback(
         Output("state-detail", "children"),
@@ -417,8 +490,12 @@ def create_app() -> dash.Dash:
         if not node_data or not text:
             return ""
         try:
-            model = parse_smv(text)
-            result = explore(model)
+            cached = _get_cached(text)
+            if cached:
+                result, _ = cached
+            else:
+                model = parse_smv(text)
+                result = explore(model)
             detail = get_state_detail(result, node_data.get("id", ""))
             if detail:
                 sd = detail["state"]
@@ -436,71 +513,112 @@ def create_app() -> dash.Dash:
                     f" | Successors: {detail['successor_count']}",
                 ])
             return f"Node: {node_data.get('label', '?')}"
-        except Exception:
-            return ""
+        except Exception as e:
+            log.exception("Error in show_state_detail callback")
+            return html.Span(f"Error: {e}", style={"color": "#e74c3c", "fontSize": "11px"})
 
-    # ---- Hover tooltip via clientside callback ----
-    # mouseoverNodeData gives us the node's data dict on hover
-    @app.callback(
+    # ---- Hover tooltip via clientside callback (runs in browser) ----
+    app.clientside_callback(
+        """
+        function(hoverData, mouseoutData, modelData) {
+            var triggered = dash_clientside.callback_context.triggered;
+            if (!triggered || triggered.length === 0) {
+                return [window.dash_clientside.no_update,
+                        window.dash_clientside.no_update];
+            }
+            var triggerId = triggered[0].prop_id;
+
+            // Hide on mouseout
+            if (triggerId.indexOf('mouseoutNodeData') >= 0 || !hoverData) {
+                return ['', {display: 'none'}];
+            }
+
+            // Build content lines from variable names
+            var lines = [];
+            var varNames = [];
+            if (modelData && modelData.variables) {
+                varNames = Object.keys(modelData.variables);
+            }
+            for (var i = 0; i < varNames.length; i++) {
+                var v = varNames[i];
+                if (v in hoverData) {
+                    lines.push(v + ' = ' + hoverData[v]);
+                }
+            }
+            // Fallback: show all data keys except id/label/depth
+            if (lines.length === 0) {
+                var keys = Object.keys(hoverData);
+                for (var j = 0; j < keys.length; j++) {
+                    var k = keys[j];
+                    if (k !== 'id' && k !== 'label' && k !== 'depth') {
+                        lines.push(k + ' = ' + hoverData[k]);
+                    }
+                }
+            }
+            if (lines.length === 0) {
+                lines.push(hoverData.label || '?');
+            }
+
+            // Position near cursor
+            var x = (window._smvisMouseX || 300) + 15;
+            var y = (window._smvisMouseY || 200) + 15;
+            // Keep tooltip on screen
+            if (x + 300 > window.innerWidth) { x = x - 330; }
+            if (y + 200 > window.innerHeight) { y = y - 220; }
+
+            var style = {
+                display: 'block',
+                position: 'fixed',
+                left: x + 'px',
+                top: y + 'px',
+                backgroundColor: 'rgba(44, 62, 80, 0.95)',
+                color: '#ecf0f1',
+                padding: '10px 14px',
+                borderRadius: '6px',
+                fontSize: '14px',
+                fontFamily: 'Consolas, monospace',
+                lineHeight: '1.6',
+                pointerEvents: 'none',
+                zIndex: '9999',
+                boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                maxWidth: '400px',
+                whiteSpace: 'pre-line',
+            };
+
+            return [lines.join('\\n'), style];
+        }
+        """,
         Output("hover-tooltip", "children"),
         Output("hover-tooltip", "style"),
         Input("state-graph", "mouseoverNodeData"),
         Input("state-graph", "mouseoutNodeData"),
         State("parsed-model-store", "data"),
     )
-    def update_hover_tooltip(hover_data, mouseout_data, model_data):
-        ctx = dash.callback_context
-        if not ctx.triggered:
-            return no_update, no_update
 
-        trigger_id = ctx.triggered[0]["prop_id"]
-
-        # Hide tooltip on mouseout
-        if "mouseoutNodeData" in trigger_id or not hover_data:
-            return "", {"display": "none"}
-
-        # Build tooltip content from the node data fields
-        # Node data has variable names as keys (set in graph_builder)
-        var_names = []
-        if model_data and "variables" in model_data:
-            var_names = list(model_data["variables"].keys())
-
-        lines = []
-        for var in var_names:
-            if var in hover_data:
-                lines.append(f"{var} = {hover_data[var]}")
-
-        # Fallback: show all data keys except id/label/depth
-        if not lines:
-            for k, v in hover_data.items():
-                if k not in ("id", "label", "depth"):
-                    lines.append(f"{k} = {v}")
-
-        if not lines:
-            lines.append(hover_data.get("label", "?"))
-
-        # Show tooltip (positioned by CSS near center-right of graph area)
-        tooltip_style = {
-            "display": "block",
-            "position": "fixed",
-            "top": "200px",
-            "right": "40px",
-            "backgroundColor": "rgba(44, 62, 80, 0.95)",
-            "color": "#ecf0f1",
-            "padding": "10px 14px",
-            "borderRadius": "6px",
-            "fontSize": "14px",
-            "fontFamily": "Consolas, monospace",
-            "lineHeight": "1.6",
-            "pointerEvents": "none",
-            "zIndex": "9999",
-            "boxShadow": "0 4px 12px rgba(0,0,0,0.3)",
-            "maxWidth": "400px",
-            "whiteSpace": "pre-line",
+    # ---- PNG Export callbacks (clientside) ----
+    app.clientside_callback(
+        """
+        function(n_clicks) {
+            if (!n_clicks) { return window.dash_clientside.no_update; }
+            return {type: 'png', action: 'download', options: {bg: '#ffffff', full: true}};
         }
+        """,
+        Output("state-graph", "generateImage"),
+        Input("btn-export-graph", "n_clicks"),
+        prevent_initial_call=True,
+    )
 
-        content = "\n".join(lines)
-        return content, tooltip_style
+    app.clientside_callback(
+        """
+        function(n_clicks) {
+            if (!n_clicks) { return window.dash_clientside.no_update; }
+            return {type: 'png', action: 'download', options: {bg: '#ffffff', full: true}};
+        }
+        """,
+        Output("bdd-graph", "generateImage"),
+        Input("btn-export-bdd", "n_clicks"),
+        prevent_initial_call=True,
+    )
 
     return app
 
@@ -619,6 +737,18 @@ def _build_bdd_view(bdd_result: BddResult, selector: str) -> tuple[list, html.Di
         node = bdd_result.reached_bdd
         label = "Reachable States"
         node_count = bdd_result.reached_node_count
+    elif selector == "domain":
+        node = bdd_result.domain_constraint
+        label = "Domain Constraint"
+        node_count = len(node)
+    elif selector.startswith("iter_"):
+        idx = int(selector.split("_")[1])
+        if idx < len(bdd_result.iteration_bdds):
+            node = bdd_result.iteration_bdds[idx]
+            label = f"Reached after Iteration {idx}"
+            node_count = len(node)
+        else:
+            return [], html.Div("Iteration not available.")
     else:
         return [], ""
 
@@ -631,6 +761,15 @@ def _build_bdd_view(bdd_result: BddResult, selector: str) -> tuple[list, html.Di
         html.Div(f"BDD nodes: {node_count}"),
     ]
 
+    # Reduction stats
+    reduction = get_reduction_stats(node, bdd_result.bdd, bdd_result.encoding)
+    info_items.append(html.Div(
+        f"Full tree: {reduction['full_tree_nodes']:,} nodes → "
+        f"ROBDD: {reduction['robdd_nodes']} nodes "
+        f"({reduction['reduction_pct']}% reduction)",
+        style={"fontSize": "11px", "color": "#7f8c8d", "marginTop": "4px"},
+    ))
+
     if selector == "reached":
         info_items.append(html.Div(f"States represented: {bdd_result.total_reachable}"))
         info_items.append(html.H6("Fixpoint Iterations:", style={"margin": "8px 0 4px"}))
@@ -641,6 +780,13 @@ def _build_bdd_view(bdd_result: BddResult, selector: str) -> tuple[list, html.Di
                 style={"fontSize": "11px", "paddingLeft": "8px"},
             ))
 
+    if selector == "domain":
+        info_items.append(html.Div(
+            "Constrains BDD bit patterns to valid domain values. "
+            "Invalid codes (e.g., code 5 for a 3-value enum using 3 bits) are excluded.",
+            style={"fontSize": "11px", "color": "#666", "marginTop": "4px"},
+        ))
+
     # Encoding table
     info_items.append(html.H6("Binary Encoding:", style={"margin": "8px 0 4px"}))
     for enc_info in summary["encoding"]:
@@ -649,6 +795,43 @@ def _build_bdd_view(bdd_result: BddResult, selector: str) -> tuple[list, html.Di
             f"{enc_info['bits']} bits ({enc_info['bdd_vars']})",
             style={"fontSize": "11px", "paddingLeft": "8px"},
         ))
+
+    # Truth table for small BDDs (not for transition relation which uses primed vars)
+    if selector not in ("trans",):
+        var_names = list(bdd_result.encoding.keys())
+        truth_table = build_truth_table(
+            node, bdd_result.bdd, bdd_result.encoding, var_names, max_rows=64
+        )
+        if truth_table is not None and len(truth_table) <= 64:
+            info_items.append(html.H6("Satisfying Assignments:", style={"margin": "8px 0 4px"}))
+            # Build HTML table
+            header = html.Tr([html.Th(v, style={"padding": "2px 6px", "fontSize": "10px",
+                                                  "borderBottom": "1px solid #ccc"})
+                              for v in var_names])
+            rows = []
+            for row in truth_table:
+                cells = [html.Td(str(row.get(v, "?")),
+                                 style={"padding": "2px 6px", "fontSize": "10px"})
+                         for v in var_names]
+                rows.append(html.Tr(cells))
+            info_items.append(html.Div(
+                html.Table([html.Thead(header), html.Tbody(rows)],
+                           style={"borderCollapse": "collapse"}),
+                style={"maxHeight": "150px", "overflowY": "auto", "marginTop": "4px"},
+            ))
+
+    # ROBDD explanation
+    info_items.append(html.H6("ROBDD Properties:", style={"margin": "8px 0 4px"}))
+    info_items.append(html.Div([
+        html.Div("• Green (solid) edges = high/then (variable = 1)",
+                 style={"fontSize": "10px", "color": "#27ae60"}),
+        html.Div("• Red (dashed) edges = low/else (variable = 0)",
+                 style={"fontSize": "10px", "color": "#e74c3c"}),
+        html.Div("• Redundant test removal: nodes where high = low are eliminated",
+                 style={"fontSize": "10px", "color": "#666"}),
+        html.Div("• Isomorphic subgraph merging: identical sub-BDDs share one node",
+                 style={"fontSize": "10px", "color": "#666"}),
+    ]))
 
     return elements, html.Div(info_items)
 

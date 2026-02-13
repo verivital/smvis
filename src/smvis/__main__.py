@@ -13,7 +13,7 @@ def main():
             pass
 
     app = create_app()
-    print(f"Starting nuXmv Model Visualizer at http://localhost:{port}")
+    print(f"Starting smvis at http://localhost:{port}")
     webbrowser.open(f"http://localhost:{port}")
     app.run(debug=True, port=port, use_reloader=False)
 

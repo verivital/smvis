@@ -1,1 +1,1 @@
-"""nuXmv Model Visualizer - Interactive visualization of finite-state nuXmv models."""
+"""smvis - Interactive visualization of finite-state SMV models."""

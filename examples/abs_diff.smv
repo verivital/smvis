@@ -1,0 +1,59 @@
+MODULE main
+-- Python algorithm (absolute difference):
+--   if a >= b:
+--       result = a - b
+--   else:
+--       result = b - a
+
+VAR
+    a : 0..7;
+    b : 0..7;
+    result : 0..7;
+    pc : {start, branch_ge, branch_lt, done};
+
+ASSIGN
+    -- a, b unconstrained (all 8*8=64 input combinations)
+    init(result) := 0;
+    init(pc) := start;
+
+    next(pc) := case
+        pc = start & a >= b : branch_ge;
+        pc = start & a < b  : branch_lt;
+        pc = branch_ge : done;
+        pc = branch_lt : done;
+        TRUE : pc;
+    esac;
+
+    next(result) := case
+        pc = branch_ge : a - b;
+        pc = branch_lt : b - a;
+        TRUE : result;
+    esac;
+
+    next(a) := a;
+    next(b) := b;
+
+-- result is correct: |a - b|
+INVARSPEC pc = done & a >= b -> result = a - b
+INVARSPEC pc = done & a < b  -> result = b - a
+
+-- result is non-negative (always true for unsigned)
+INVARSPEC result >= 0
+
+-- algorithm terminates
+CTLSPEC AF (pc = done)
+
+-- result is zero when a = b
+INVARSPEC (pc = done & a = b) -> result = 0
+
+-- result is at most 7
+INVARSPEC result <= 7
+
+-- specific example: |5 - 3| = 2
+LTLSPEC (a = 5 & b = 3) -> F (result = 2)
+
+-- specific example: |2 - 7| = 5
+LTLSPEC (a = 2 & b = 7) -> F (result = 5)
+
+-- symmetry: |a - b| = |b - a| (can't express directly, but both reach done)
+CTLSPEC AG (pc = start -> AF (pc = done))

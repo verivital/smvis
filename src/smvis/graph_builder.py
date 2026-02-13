@@ -1,5 +1,6 @@
 """Build Cytoscape.js elements from explicit-state exploration results."""
 from __future__ import annotations
+import math
 from smvis.explicit_engine import ExplicitResult, State
 
 
@@ -156,7 +157,7 @@ def get_state_detail(result: ExplicitResult, state_id: str) -> dict | None:
                 if src == sk:
                     succs.add(dst)
                 if dst == sk:
-                    preds.add(dst)
+                    preds.add(src)
             return {
                 "state": sd,
                 "is_initial": sk in result.initial_states,
@@ -165,6 +166,40 @@ def get_state_detail(result: ExplicitResult, state_id: str) -> dict | None:
                 "predecessor_count": len(preds),
             }
     return None
+
+
+def compute_concentric_positions(elements: list[dict],
+                                  spacing: int = 120) -> list[dict]:
+    """Compute concentric ring positions based on BFS depth.
+
+    Nodes at the same BFS depth are arranged in a ring. Returns the
+    same elements list with ``position`` dicts added to node elements.
+    Use with ``layout={"name": "preset"}``.
+    """
+    nodes = [e for e in elements if "source" not in e.get("data", {})]
+    edges = [e for e in elements if "source" in e.get("data", {})]
+
+    # Group nodes by depth
+    depth_groups: dict[int, list[dict]] = {}
+    for node in nodes:
+        d = node["data"].get("depth", -1)
+        depth_groups.setdefault(d, []).append(node)
+
+    for d in sorted(depth_groups.keys()):
+        group = depth_groups[d]
+        n = len(group)
+        if d <= 0 and n == 1:
+            radius = 0
+        else:
+            radius = max(d, 1) * spacing
+        for i, node in enumerate(group):
+            angle = 2 * math.pi * i / max(n, 1)
+            node["position"] = {
+                "x": round(radius * math.cos(angle)),
+                "y": round(radius * math.sin(angle)),
+            }
+
+    return nodes + edges
 
 
 CYTO_STYLESHEET = [
@@ -284,6 +319,20 @@ BDD_STYLESHEET = [
             "line-style": "dashed",
             "width": 2,
             "curve-style": "bezier",
+        },
+    },
+    {
+        "selector": "node.level-label",
+        "style": {
+            "background-opacity": 0,
+            "border-width": 0,
+            "label": "data(label)",
+            "font-size": "8px",
+            "color": "#888",
+            "text-halign": "right",
+            "text-valign": "center",
+            "width": 10,
+            "height": 10,
         },
     },
 ]

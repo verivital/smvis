@@ -41,6 +41,7 @@ class BddResult:
     init_node_count: int
     trans_node_count: int
     reached_node_count: int
+    iteration_bdds: list[object] = field(default_factory=list)  # reached BDD after each iteration
 
 
 def _build_encoding(model: SmvModel) -> tuple[_bdd.BDD, dict[str, EncodingInfo]]:
@@ -183,6 +184,7 @@ def build_from_explicit(model: SmvModel,
     # Forward fixpoint reachability
     reached = init_bdd
     iterations = []
+    iteration_bdds = [init_bdd]  # Store BDD at each iteration (index 0 = initial)
     iteration = 0
 
     while True:
@@ -217,6 +219,7 @@ def build_from_explicit(model: SmvModel,
         if new_reached == reached:
             break
         reached = new_reached
+        iteration_bdds.append(reached)
 
         # Safety limit
         if iteration > 1000:
@@ -236,6 +239,7 @@ def build_from_explicit(model: SmvModel,
         init_node_count=len(init_bdd),
         trans_node_count=len(trans_bdd),
         reached_node_count=len(reached),
+        iteration_bdds=iteration_bdds,
     )
 
 
@@ -297,10 +301,18 @@ def decode_bdd_states(bdd_node, bdd: _bdd.BDD, encoding: dict[str, EncodingInfo]
 
 
 def get_bdd_structure(bdd_node, bdd: _bdd.BDD, max_nodes: int = 200) -> list[dict]:
-    """Extract BDD DAG structure for visualization. Returns list of node/edge dicts."""
+    """Extract BDD DAG structure with ROBDD hierarchical positions.
+
+    Nodes are positioned by variable ordering level (y-axis) with
+    horizontal spacing within each level. Terminal nodes go at the bottom.
+    Returns list of node/edge dicts with ``position`` for preset layout.
+    """
     elements = []
     visited = set()
     node_count = [0]
+    # Collect nodes by their variable level for positioning
+    level_nodes: dict[str, list[int]] = {}  # var_name -> [node_ids]
+    node_vars: dict[int, str] = {}  # node_id -> var_name or "T"/"F"
 
     def _traverse(node):
         node_id = int(node)
@@ -312,15 +324,21 @@ def get_bdd_structure(bdd_node, bdd: _bdd.BDD, max_nodes: int = 200) -> list[dic
         if node == bdd.true:
             elements.append({"data": {"id": str(node_id), "label": "1"},
                              "classes": "terminal-true"})
+            node_vars[node_id] = "__terminal__"
+            level_nodes.setdefault("__terminal__", []).append(node_id)
             return
         if node == bdd.false:
             elements.append({"data": {"id": str(node_id), "label": "0"},
                              "classes": "terminal-false"})
+            node_vars[node_id] = "__terminal__"
+            level_nodes.setdefault("__terminal__", []).append(node_id)
             return
 
         var = node.var
         elements.append({"data": {"id": str(node_id), "label": var},
                          "classes": "internal"})
+        node_vars[node_id] = var
+        level_nodes.setdefault(var, []).append(node_id)
 
         # High child (then)
         high = node.high
@@ -339,9 +357,90 @@ def get_bdd_structure(bdd_node, bdd: _bdd.BDD, max_nodes: int = 200) -> list[dic
     try:
         _traverse(bdd_node)
     except (AttributeError, TypeError):
-        # If BDD internals don't expose .high/.low, return stats only
         elements = [{"data": {"id": "info",
                               "label": f"BDD: {len(bdd_node)} nodes"},
                      "classes": "info"}]
+        return elements
+
+    # Compute ROBDD hierarchical positions
+    # Get variable ordering from the BDD manager
+    try:
+        var_order = list(bdd.vars)
+    except Exception:
+        var_order = []
+
+    # Build ordered list of levels that actually appear in the BDD
+    ordered_levels = []
+    for v in var_order:
+        if v in level_nodes:
+            ordered_levels.append(v)
+    # Terminal level at the bottom
+    if "__terminal__" in level_nodes:
+        ordered_levels.append("__terminal__")
+
+    # Assign y-coordinate by level, x by position within level
+    y_spacing = 80
+    x_spacing = 80
+    node_positions: dict[str, dict] = {}
+
+    for level_idx, var_name in enumerate(ordered_levels):
+        nodes_at_level = level_nodes[var_name]
+        n = len(nodes_at_level)
+        total_width = (n - 1) * x_spacing
+        start_x = -total_width / 2
+        for i, nid in enumerate(nodes_at_level):
+            node_positions[str(nid)] = {
+                "x": round(start_x + i * x_spacing),
+                "y": level_idx * y_spacing,
+            }
+
+    # Apply positions to node elements
+    for elem in elements:
+        nid = elem["data"].get("id")
+        if nid and nid in node_positions and "source" not in elem["data"]:
+            elem["position"] = node_positions[nid]
 
     return elements
+
+
+def build_truth_table(bdd_node, bdd: _bdd.BDD, encoding: dict[str, EncodingInfo],
+                      var_names: list[str], max_rows: int = 64) -> list[dict] | None:
+    """Build a truth table showing satisfying assignments of a BDD.
+
+    Returns a list of row dicts with SMV variable values and "result" column,
+    or None if the BDD has too many variables (> 6 relevant vars = 64 rows).
+    """
+    # Get all current-state BDD variables involved
+    all_bits = []
+    for vn in var_names:
+        enc = encoding[vn]
+        all_bits.extend(enc.bit_vars)
+
+    if len(all_bits) > 10:
+        return None  # Too many BDD vars for a full truth table
+
+    # Enumerate satisfying assignments
+    rows = []
+    count = 0
+    for assignment in bdd.pick_iter(bdd_node, care_vars=set(all_bits)):
+        if count >= max_rows:
+            break
+        row = {}
+        valid = True
+        for vn in var_names:
+            enc = encoding[vn]
+            code = 0
+            for i in range(enc.n_bits):
+                bv = enc.bit_vars[i]
+                if bv in assignment and assignment[bv]:
+                    code |= (1 << i)
+            if code in enc.code_to_val:
+                row[vn] = enc.code_to_val[code]
+            else:
+                valid = False
+                break
+        if valid:
+            rows.append(row)
+            count += 1
+
+    return rows if rows else None

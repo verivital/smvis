@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smvis"
+version = "0.1.0"
+description = "Interactive visualization of finite-state SMV models"
+requires-python = ">=3.10"
+dependencies = [
+    "lark>=1.1",
+    "dd>=0.5",
+    "dash>=2.14",
+    "dash-cytoscape>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[project.scripts]
+smvis = "smvis.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+smvis = ["smv_grammar.lark", "assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

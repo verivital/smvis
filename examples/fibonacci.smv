@@ -1,0 +1,64 @@
+MODULE main
+-- Python algorithm:
+--   a, b = 0, 1
+--   for i in range(n):
+--       a, b = b, a + b
+--   # result: a = fib(n)
+
+VAR
+    a : 0..15;
+    b : 0..15;
+    i : 0..6;
+    pc : {loop, done};
+
+DEFINE n := 5;
+
+ASSIGN
+    init(a) := 0;
+    init(b) := 1;
+    init(i) := 0;
+    init(pc) := loop;
+
+    -- SMV simultaneous semantics: next(a):=b and next(b):=a+b
+    -- reads current a,b so no temp variable needed
+    next(a) := case
+        pc = loop & i < n : b;
+        TRUE : a;
+    esac;
+
+    next(b) := case
+        pc = loop & i < n : a + b;
+        TRUE : b;
+    esac;
+
+    next(i) := case
+        pc = loop & i < n : i + 1;
+        TRUE : i;
+    esac;
+
+    next(pc) := case
+        pc = loop & i < n : loop;
+        pc = loop & i >= n : done;
+        TRUE : pc;
+    esac;
+
+-- fib(5) = 5
+INVARSPEC pc = done -> a = 5
+
+-- fib(5) < 10
+INVARSPEC pc = done -> a < 10
+
+-- loop always terminates
+CTLSPEC AF (pc = done)
+
+-- i never exceeds n
+INVARSPEC i <= n
+
+-- a and b stay in range
+INVARSPEC a <= 15 & b <= 15
+
+-- eventually a = 5
+LTLSPEC F (a = 5)
+
+-- always eventually done (trivially true since done is absorbing)
+LTLSPEC G F (pc = done)
