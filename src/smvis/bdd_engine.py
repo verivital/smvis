@@ -362,6 +362,12 @@ def get_bdd_structure(bdd_node, bdd: _bdd.BDD, max_nodes: int = 200) -> list[dic
                      "classes": "info"}]
         return elements
 
+    # Remove edges that reference nodes truncated by max_nodes limit
+    visited_ids = {str(nid) for nid in visited}
+    elements = [e for e in elements
+                if "source" not in e.get("data", {})
+                or (e["data"]["source"] in visited_ids and e["data"]["target"] in visited_ids)]
+
     # Compute ROBDD hierarchical positions
     # Get variable ordering from the BDD manager
     try:

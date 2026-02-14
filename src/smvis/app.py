@@ -4,6 +4,7 @@ import hashlib
 import os
 import json
 import logging
+import time
 import traceback
 
 import dash
@@ -42,6 +43,20 @@ def _put_cached(text: str, explicit: ExplicitResult, bdd: BddResult):
         oldest = next(iter(_compute_cache))
         del _compute_cache[oldest]
 
+# Callback log for debugging GUI interactions server-side
+_callback_log: list[dict] = []
+_CALLBACK_LOG_MAX = 200
+
+
+def _log_callback(name: str, inputs: dict, error: str | None = None):
+    entry = {"time": time.time(), "callback": name, "inputs": inputs}
+    if error:
+        entry["error"] = error
+    _callback_log.append(entry)
+    if len(_callback_log) > _CALLBACK_LOG_MAX:
+        _callback_log.pop(0)
+
+
 # Path to bundled .smv model files (smvis/examples/)
 _MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "examples")
 
@@ -65,7 +80,11 @@ def _load_model_text(filename: str) -> str:
 
 
 def create_app() -> dash.Dash:
-    app = dash.Dash(__name__, suppress_callback_exceptions=True)
+    app = dash.Dash(
+        __name__,
+        suppress_callback_exceptions=True,
+        assets_folder=os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets"),
+    )
 
     model_files = _find_model_files()
     default_model = model_files[0] if model_files else ""
@@ -84,6 +103,11 @@ def create_app() -> dash.Dash:
                     style={"width": "200px"},
                     clearable=False,
                 ),
+                html.Button("Debug Log", id="btn-debug", n_clicks=0, style={
+                    "marginLeft": "16px", "fontSize": "11px", "padding": "4px 10px",
+                    "backgroundColor": "#7f8c8d", "color": "#fff", "border": "none",
+                    "borderRadius": "3px", "cursor": "pointer",
+                }),
             ], style={"display": "flex", "alignItems": "center"}),
         ], style={
             "display": "flex", "justifyContent": "space-between",
@@ -91,7 +115,15 @@ def create_app() -> dash.Dash:
             "backgroundColor": "#2c3e50", "color": "#ecf0f1",
         }),
 
-        # ---- Main Content ----
+        # ---- Debug Log Panel (hidden by default) ----
+        html.Div(id="debug-panel", style={
+            "display": "none", "padding": "8px 20px",
+            "backgroundColor": "#1e1e1e", "color": "#d4d4d4",
+            "maxHeight": "200px", "overflowY": "auto",
+            "fontSize": "11px", "fontFamily": "Consolas, monospace",
+        }),
+
+        # ---- Main Content (resizable panels) ----
         html.Div([
             # ---- Left Column: Editor + Controls ----
             html.Div([
@@ -129,7 +161,10 @@ def create_app() -> dash.Dash:
                     html.H4("Statistics", style={"marginTop": "0"}),
                     html.Div(id="stats-panel", style={"fontSize": "12px"}),
                 ]),
-            ], style={"width": "30%", "padding": "12px", "overflowY": "auto"}),
+            ], className="left-panel"),
+
+            # ---- Resize Handle ----
+            html.Div(className="resize-handle"),
 
             # ---- Right Column: Visualizations ----
             html.Div([
@@ -188,11 +223,13 @@ def create_app() -> dash.Dash:
                             ),
                             html.Label("max nodes", style={"fontSize": "11px",
                                                             "marginLeft": "4px"}),
-                        ], style={"display": "flex", "alignItems": "center"}),
+                        ], style={"display": "flex", "alignItems": "center",
+                                  "flexWrap": "wrap", "gap": "4px"}),
                     ], style={"display": "flex", "justifyContent": "space-between",
                               "alignItems": "center", "marginBottom": "4px"}),
                     cyto.Cytoscape(
                         id="state-graph",
+                        clearOnUnhover=True,
                         layout={"name": "cose", "animate": False,
                                 "nodeRepulsion": 8000, "idealEdgeLength": 50},
                         style={"width": "100%", "height": "380px",
@@ -224,7 +261,7 @@ def create_app() -> dash.Dash:
                     }),
                 ], style={"marginBottom": "12px", "position": "relative"}),
 
-                # BDD Section
+                # BDD Section (full-width, stacked layout)
                 html.Div([
                     html.Div([
                         html.H4("BDD Visualization", style={"margin": "0", "flex": "1"}),
@@ -249,25 +286,21 @@ def create_app() -> dash.Dash:
                         ),
                     ], style={"display": "flex", "justifyContent": "space-between",
                               "alignItems": "center", "marginBottom": "4px"}),
-                    html.Div([
-                        cyto.Cytoscape(
-                            id="bdd-graph",
-                            layout={"name": "preset", "animate": False},
-                            style={"width": "50%", "height": "250px",
-                                   "border": "1px solid #ddd",
-                                   "display": "inline-block"},
-                            stylesheet=BDD_STYLESHEET,
-                            elements=[],
-                        ),
-                        html.Div(id="bdd-info", style={
-                            "width": "48%", "display": "inline-block",
-                            "verticalAlign": "top", "paddingLeft": "12px",
-                            "fontSize": "12px",
-                        }),
-                    ]),
+                    cyto.Cytoscape(
+                        id="bdd-graph",
+                        layout={"name": "preset", "animate": False},
+                        style={"width": "100%", "height": "350px",
+                               "border": "1px solid #ddd"},
+                        stylesheet=BDD_STYLESHEET,
+                        elements=[],
+                    ),
+                    html.Div(id="bdd-info", style={
+                        "fontSize": "12px", "marginTop": "8px",
+                        "maxHeight": "250px", "overflowY": "auto",
+                    }),
                 ]),
-            ], style={"width": "70%", "padding": "12px", "overflowY": "auto"}),
-        ], style={"display": "flex", "height": "calc(100vh - 60px)"}),
+            ], className="right-panel"),
+        ], className="main-container"),
 
         # ---- Hidden Stores ----
         dcc.Store(id="parsed-model-store", data=None),
@@ -350,6 +383,8 @@ def create_app() -> dash.Dash:
         prevent_initial_call=True,
     )
     def compute_all(n, text, graph_opts, filter_expr, layout, max_nodes, bdd_sel):
+        _log_callback("compute_all", {"graph_opts": graph_opts, "layout": layout,
+                                       "max_nodes": max_nodes, "bdd_sel": bdd_sel})
         if not n or not text:
             return (no_update,) * 8
         try:
@@ -399,6 +434,8 @@ def create_app() -> dash.Dash:
             return (explicit_data, bdd_data, stats, graph_elements,
                     bdd_elements, bdd_layout, bdd_info, bdd_options)
         except Exception as e:
+            _log_callback("compute_all", {"bdd_sel": bdd_sel}, error=str(e))
+            log.exception("Error in compute_all callback")
             err_msg = html.Div([
                 html.Span(f"Error: {e}", style={"color": "#e74c3c"}),
                 html.Pre(traceback.format_exc(), style={"fontSize": "10px"}),
@@ -417,6 +454,8 @@ def create_app() -> dash.Dash:
         prevent_initial_call=True,
     )
     def update_graph(graph_opts, filter_expr, layout, max_nodes, explicit_data, text):
+        _log_callback("update_graph", {"graph_opts": graph_opts, "layout": layout,
+                                        "max_nodes": max_nodes, "filter": filter_expr})
         if not explicit_data or not text:
             return no_update, no_update
         try:
@@ -443,7 +482,8 @@ def create_app() -> dash.Dash:
                 elements = compute_concentric_positions(elements)
                 layout_dict = {"name": "preset", "animate": False}
             return elements, layout_dict
-        except Exception:
+        except Exception as e:
+            _log_callback("update_graph", {"layout": layout}, error=str(e))
             log.exception("Error in update_graph callback")
             return [], {"name": "cose", "animate": False}
 
@@ -458,6 +498,7 @@ def create_app() -> dash.Dash:
         prevent_initial_call=True,
     )
     def update_bdd_view(bdd_sel, bdd_data, text, explicit_data):
+        _log_callback("update_bdd_view", {"bdd_sel": bdd_sel})
         if not bdd_data or not text:
             return no_update, no_update, no_update
         try:
@@ -478,6 +519,7 @@ def create_app() -> dash.Dash:
             bdd_layout = {"name": "preset", "animate": False}
             return elements, bdd_layout, info
         except Exception as e:
+            _log_callback("update_bdd_view", {"bdd_sel": bdd_sel}, error=str(e))
             log.exception("Error in update_bdd_view callback")
             return [], no_update, html.Span(f"Error: {e}", style={"color": "#e74c3c"})
 
@@ -487,6 +529,7 @@ def create_app() -> dash.Dash:
         State("smv-editor", "value"),
     )
     def show_state_detail(node_data, text):
+        _log_callback("show_state_detail", {"node_id": node_data.get("id") if node_data else None})
         if not node_data or not text:
             return ""
         try:
@@ -514,22 +557,47 @@ def create_app() -> dash.Dash:
                 ])
             return f"Node: {node_data.get('label', '?')}"
         except Exception as e:
+            _log_callback("show_state_detail", {}, error=str(e))
             log.exception("Error in show_state_detail callback")
             return html.Span(f"Error: {e}", style={"color": "#e74c3c", "fontSize": "11px"})
 
+    # ---- Debug log panel toggle ----
+    @app.callback(
+        Output("debug-panel", "children"),
+        Output("debug-panel", "style"),
+        Input("btn-debug", "n_clicks"),
+        State("debug-panel", "style"),
+        prevent_initial_call=True,
+    )
+    def toggle_debug_panel(n_clicks, current_style):
+        if not n_clicks:
+            return no_update, no_update
+        visible = current_style.get("display", "none") != "none"
+        new_style = {**current_style, "display": "none" if visible else "block"}
+        if visible:
+            return no_update, new_style
+        # Render the log entries
+        from datetime import datetime
+        lines = []
+        for entry in reversed(_callback_log):
+            ts = datetime.fromtimestamp(entry["time"]).strftime("%H:%M:%S")
+            cb = entry["callback"]
+            inputs_str = json.dumps(entry["inputs"], default=str)[:120]
+            line = f"[{ts}] {cb}: {inputs_str}"
+            if "error" in entry:
+                line += f"  ERROR: {entry['error']}"
+            lines.append(line)
+        content = html.Pre("\n".join(lines) if lines else "(no callbacks logged yet)")
+        return content, new_style
+
     # ---- Hover tooltip via clientside callback (runs in browser) ----
+    # Uses clearOnUnhover=True on the Cytoscape component so that
+    # mouseoverNodeData is cleared to None when the mouse leaves a node.
     app.clientside_callback(
         """
-        function(hoverData, mouseoutData, modelData) {
-            var triggered = dash_clientside.callback_context.triggered;
-            if (!triggered || triggered.length === 0) {
-                return [window.dash_clientside.no_update,
-                        window.dash_clientside.no_update];
-            }
-            var triggerId = triggered[0].prop_id;
-
-            // Hide on mouseout
-            if (triggerId.indexOf('mouseoutNodeData') >= 0 || !hoverData) {
+        function(hoverData, modelData) {
+            // clearOnUnhover=True sets hoverData to null on mouseout
+            if (!hoverData) {
                 return ['', {display: 'none'}];
             }
 
@@ -591,7 +659,6 @@ def create_app() -> dash.Dash:
         Output("hover-tooltip", "children"),
         Output("hover-tooltip", "style"),
         Input("state-graph", "mouseoverNodeData"),
-        Input("state-graph", "mouseoutNodeData"),
         State("parsed-model-store", "data"),
     )
 
