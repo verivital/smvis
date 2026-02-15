@@ -18,10 +18,19 @@ from smvis.bdd_engine import build_from_explicit, BddResult, get_bdd_structure, 
 from smvis.graph_builder import (
     build_elements, compute_concentric_positions,
     CYTO_STYLESHEET, BDD_STYLESHEET, get_state_detail,
+    apply_trace_overlay,
 )
 from smvis.bdd_visualizer import get_bdd_summary, get_reduction_stats
+from smvis.nuxmv_runner import (
+    run_batch_check, nuxmv_available, NuxmvSession, write_temp_model,
+    _NUXMV_PATH,
+)
 
 log = logging.getLogger("smvis")
+
+# Module-level nuXmv interactive session (one per server instance)
+_nuxmv_session: NuxmvSession | None = None
+_nuxmv_temp_path: str | None = None
 
 # Result cache keyed by SHA-256 of SMV text to avoid recomputation
 _compute_cache: dict[str, tuple[ExplicitResult, BddResult]] = {}
@@ -160,6 +169,30 @@ def create_app() -> dash.Dash:
                 html.Div([
                     html.H4("Statistics", style={"marginTop": "0"}),
                     html.Div(id="stats-panel", style={"fontSize": "12px"}),
+                ]),
+
+                # Verification
+                html.Div([
+                    html.H4("Verification", style={"marginTop": "12px"}),
+                    html.Div([
+                        html.Button("Check All Specs", id="btn-check-specs",
+                                    n_clicks=0, style=_btn_style("#e67e22")),
+                        html.Button("Clear Trace", id="btn-clear-trace",
+                                    n_clicks=0, style={
+                                        **_btn_style("#95a5a6"),
+                                        "fontSize": "11px", "padding": "4px 10px",
+                                    }),
+                    ], style={"display": "flex", "gap": "8px"}),
+                    dcc.Dropdown(
+                        id="trace-selector", options=[], value=None,
+                        placeholder="Select trace to visualize...",
+                        style={"fontSize": "11px", "marginTop": "6px"},
+                        clearable=True,
+                    ),
+                    html.Div(id="spec-results", style={
+                        "fontSize": "11px", "marginTop": "8px",
+                        "maxHeight": "300px", "overflowY": "auto",
+                    }),
                 ]),
             ], className="left-panel"),
 
@@ -302,10 +335,56 @@ def create_app() -> dash.Dash:
             ], className="right-panel"),
         ], className="main-container"),
 
+        # ---- nuXmv Terminal Panel (bottom) ----
+        html.Div([
+            html.Div([
+                html.Span("nuXmv Terminal", style={
+                    "fontWeight": "bold", "fontSize": "13px", "flex": "1",
+                    "color": "#ecf0f1",
+                }),
+                html.Div([
+                    html.Button("go", id="btn-cmd-go", n_clicks=0,
+                                style=_term_btn_style()),
+                    html.Button("check_ctlspec", id="btn-cmd-ctl", n_clicks=0,
+                                style=_term_btn_style()),
+                    html.Button("check_ltlspec", id="btn-cmd-ltl", n_clicks=0,
+                                style=_term_btn_style()),
+                    html.Button("check_invar", id="btn-cmd-invar", n_clicks=0,
+                                style=_term_btn_style()),
+                    html.Button("show_traces", id="btn-cmd-traces", n_clicks=0,
+                                style=_term_btn_style()),
+                ], style={"display": "flex", "gap": "4px", "marginRight": "8px"}),
+                html.Button("Start", id="btn-terminal-start", n_clicks=0,
+                            style={**_btn_style("#27ae60"), "fontSize": "11px",
+                                   "padding": "3px 10px"}),
+                html.Button("Stop", id="btn-terminal-stop", n_clicks=0,
+                            style={**_btn_style("#e74c3c"), "fontSize": "11px",
+                                   "padding": "3px 10px", "marginLeft": "4px"}),
+            ], style={"display": "flex", "alignItems": "center",
+                      "padding": "6px 12px", "backgroundColor": "#2c3e50"}),
+            html.Pre(id="terminal-output", children="", className="terminal-output"),
+            html.Div([
+                html.Span("nuXmv > ", style={"color": "#3498db", "flexShrink": "0"}),
+                dcc.Input(id="terminal-input", type="text",
+                          placeholder="Type command and press Enter...",
+                          debounce=True,
+                          style={"flex": "1", "backgroundColor": "#2d2d2d",
+                                 "color": "#d4d4d4", "border": "1px solid #555",
+                                 "fontFamily": "Consolas, monospace",
+                                 "fontSize": "12px", "padding": "4px 8px"}),
+                html.Button("Send", id="btn-terminal-send", n_clicks=0,
+                            style={**_btn_style("#3498db"), "fontSize": "11px",
+                                   "padding": "3px 10px", "marginLeft": "4px"}),
+            ], className="terminal-input"),
+            dcc.Interval(id="terminal-poll", interval=500, disabled=True),
+        ], className="terminal-panel", id="terminal-panel"),
+
         # ---- Hidden Stores ----
         dcc.Store(id="parsed-model-store", data=None),
         dcc.Store(id="explicit-result-store", data=None),
         dcc.Store(id="bdd-result-store", data=None),
+        dcc.Store(id="traces-store", data=None),
+        dcc.Store(id="active-trace-store", data=None),
     ], style={"fontFamily": "Segoe UI, Arial, sans-serif"})
 
     # ================================================================
@@ -687,6 +766,233 @@ def create_app() -> dash.Dash:
         prevent_initial_call=True,
     )
 
+    # ---- Verification: Check All Specs ----
+    @app.callback(
+        Output("spec-results", "children"),
+        Output("traces-store", "data"),
+        Output("trace-selector", "options"),
+        Output("trace-selector", "value"),
+        Input("btn-check-specs", "n_clicks"),
+        State("smv-editor", "value"),
+        prevent_initial_call=True,
+    )
+    def check_all_specs(n, text):
+        _log_callback("check_all_specs", {"n": n})
+        if not n or not text:
+            return no_update, no_update, no_update, no_update
+        result = run_batch_check(text, _NUXMV_PATH)
+        if result.error:
+            return (
+                html.Div(f"Error: {result.error}", style={"color": "#e74c3c"}),
+                None, [], None,
+            )
+        rows = []
+        trace_options = []
+        traces_data = []
+        for spec in result.specs:
+            icon = "\u2713" if spec.passed else "\u2717"
+            color = "#27ae60" if spec.passed else "#e74c3c"
+            row = html.Div([
+                html.Span(icon, style={"color": color, "fontWeight": "bold",
+                                       "marginRight": "6px"}),
+                html.Span(spec.spec_kind, style={
+                    "color": "#7f8c8d", "marginRight": "6px",
+                    "fontSize": "10px", "fontStyle": "italic",
+                }),
+                html.Span(spec.spec_text),
+            ], style={"padding": "2px 0", "borderBottom": "1px solid #eee"})
+            rows.append(row)
+            if spec.trace:
+                idx = len(traces_data)
+                label_text = spec.spec_text
+                if len(label_text) > 50:
+                    label_text = label_text[:47] + "..."
+                trace_options.append({
+                    "label": f"[{spec.spec_kind}] {label_text}",
+                    "value": idx,
+                })
+                traces_data.append({
+                    "states": spec.trace.states,
+                    "loop_start": spec.trace.loop_start,
+                    "description": spec.trace.description,
+                    "spec_text": spec.spec_text,
+                    "spec_kind": spec.spec_kind,
+                })
+        n_passed = sum(1 for s in result.specs if s.passed)
+        n_total = len(result.specs)
+        summary_color = "#27ae60" if n_passed == n_total else "#e67e22"
+        header = html.Div(
+            f"{n_passed}/{n_total} specifications passed",
+            style={"fontWeight": "bold", "marginBottom": "6px", "color": summary_color},
+        )
+        return html.Div([header] + rows), traces_data, trace_options, None
+
+    # ---- Verification: Show Trace on Graph ----
+    @app.callback(
+        Output("state-graph", "elements", allow_duplicate=True),
+        Input("trace-selector", "value"),
+        State("traces-store", "data"),
+        State("smv-editor", "value"),
+        State("graph-options", "value"),
+        State("state-filter", "value"),
+        State("layout-selector", "value"),
+        State("max-nodes", "value"),
+        prevent_initial_call=True,
+    )
+    def show_trace_on_graph(trace_idx, traces_data, text, graph_opts,
+                            filter_expr, layout, max_nodes):
+        _log_callback("show_trace_on_graph", {"trace_idx": trace_idx})
+        if not text:
+            return no_update
+        cached = _get_cached(text)
+        if not cached:
+            return no_update
+        explicit_result, _ = cached
+        reachable_only = "reachable_only" in (graph_opts or [])
+        elements = build_elements(
+            explicit_result,
+            reachable_only=reachable_only,
+            max_nodes=max_nodes or 500,
+            filter_expr=filter_expr or "",
+        )
+        if layout == "concentric":
+            elements = compute_concentric_positions(elements)
+        if (trace_idx is not None and traces_data
+                and 0 <= trace_idx < len(traces_data)):
+            trace = traces_data[trace_idx]
+            elements = apply_trace_overlay(
+                elements,
+                trace["states"],
+                explicit_result.state_to_dict,
+                explicit_result.var_names,
+                loop_start=trace.get("loop_start"),
+            )
+        return elements
+
+    # ---- Verification: Clear Trace ----
+    @app.callback(
+        Output("trace-selector", "value", allow_duplicate=True),
+        Input("btn-clear-trace", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def clear_trace(n):
+        if not n:
+            return no_update
+        return None
+
+    # ---- Terminal: Start Session ----
+    @app.callback(
+        Output("terminal-output", "children", allow_duplicate=True),
+        Output("terminal-poll", "disabled"),
+        Input("btn-terminal-start", "n_clicks"),
+        State("smv-editor", "value"),
+        prevent_initial_call=True,
+    )
+    def start_terminal(n, text):
+        global _nuxmv_session, _nuxmv_temp_path
+        _log_callback("start_terminal", {"n": n})
+        if not n:
+            return no_update, no_update
+        # Stop existing session
+        if _nuxmv_session:
+            _nuxmv_session.stop()
+        if _nuxmv_temp_path:
+            try:
+                os.unlink(_nuxmv_temp_path)
+            except OSError:
+                pass
+            _nuxmv_temp_path = None
+        _nuxmv_session = NuxmvSession(_NUXMV_PATH)
+        temp_path = None
+        if text and text.strip():
+            temp_path = write_temp_model(text)
+            _nuxmv_temp_path = temp_path
+        if _nuxmv_session.start(temp_path):
+            return "Session started. Waiting for nuXmv...\n", False
+        else:
+            return "Error: Could not start nuXmv session.\n", True
+
+    # ---- Terminal: Stop Session ----
+    @app.callback(
+        Output("terminal-output", "children", allow_duplicate=True),
+        Output("terminal-poll", "disabled", allow_duplicate=True),
+        Input("btn-terminal-stop", "n_clicks"),
+        State("terminal-output", "children"),
+        prevent_initial_call=True,
+    )
+    def stop_terminal(n, current):
+        global _nuxmv_session, _nuxmv_temp_path
+        _log_callback("stop_terminal", {"n": n})
+        if not n:
+            return no_update, no_update
+        if _nuxmv_session:
+            _nuxmv_session.stop()
+            _nuxmv_session = None
+        if _nuxmv_temp_path:
+            try:
+                os.unlink(_nuxmv_temp_path)
+            except OSError:
+                pass
+            _nuxmv_temp_path = None
+        return (current or "") + "\n[Session stopped]\n", True
+
+    # ---- Terminal: Send Command ----
+    @app.callback(
+        Output("terminal-input", "value"),
+        Input("btn-terminal-send", "n_clicks"),
+        Input("terminal-input", "n_submit"),
+        State("terminal-input", "value"),
+        prevent_initial_call=True,
+    )
+    def send_terminal_command(n_click, n_submit, cmd):
+        _log_callback("send_terminal_command", {"cmd": cmd})
+        if _nuxmv_session and cmd and cmd.strip():
+            _nuxmv_session.send_command(cmd.strip())
+        return ""
+
+    # ---- Terminal: Poll Output ----
+    @app.callback(
+        Output("terminal-output", "children", allow_duplicate=True),
+        Input("terminal-poll", "n_intervals"),
+        State("terminal-output", "children"),
+        prevent_initial_call=True,
+    )
+    def poll_terminal(n, current):
+        if not _nuxmv_session:
+            return no_update
+        new = _nuxmv_session.get_new_output()
+        if not new:
+            return no_update
+        return (current or "") + new
+
+    # ---- Terminal: Quick Commands ----
+    @app.callback(
+        Output("terminal-output", "children", allow_duplicate=True),
+        Input("btn-cmd-go", "n_clicks"),
+        Input("btn-cmd-ctl", "n_clicks"),
+        Input("btn-cmd-ltl", "n_clicks"),
+        Input("btn-cmd-invar", "n_clicks"),
+        Input("btn-cmd-traces", "n_clicks"),
+        State("terminal-output", "children"),
+        prevent_initial_call=True,
+    )
+    def quick_command(n1, n2, n3, n4, n5, current):
+        commands = {
+            "btn-cmd-go": "go",
+            "btn-cmd-ctl": "check_ctlspec",
+            "btn-cmd-ltl": "check_ltlspec",
+            "btn-cmd-invar": "check_invar",
+            "btn-cmd-traces": "show_traces",
+        }
+        triggered = dash.callback_context.triggered
+        if not triggered:
+            return no_update
+        btn_id = triggered[0]["prop_id"].split(".")[0]
+        cmd = commands.get(btn_id)
+        if cmd and _nuxmv_session:
+            _nuxmv_session.send_command(cmd)
+        return no_update
+
     return app
 
 
@@ -699,6 +1005,14 @@ def _btn_style(color: str) -> dict:
         "backgroundColor": color, "color": "#fff", "border": "none",
         "padding": "6px 16px", "borderRadius": "4px", "cursor": "pointer",
         "fontSize": "13px",
+    }
+
+
+def _term_btn_style() -> dict:
+    return {
+        "backgroundColor": "#34495e", "color": "#d4d4d4", "border": "1px solid #555",
+        "padding": "2px 8px", "borderRadius": "3px", "cursor": "pointer",
+        "fontSize": "10px", "fontFamily": "Consolas, monospace",
     }
 
 

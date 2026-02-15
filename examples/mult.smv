@@ -1,12 +1,14 @@
 MODULE main
+DEFINE prod_max := 100;
 VAR
      a : 0 .. 10;
      b : 0 .. 10;
-     prod : 0 .. 100;
+     prod : 0 .. prod_max;
      --prod : 0 .. 50; -- try as not large enough range
      pc : {l0, l1, l2, l3};
      
 -- full multiply by repeated summation:
+-- assume a and b non-negative
 -- prod = 0
 -- l0: while a > 0
 -- l1:    prod += b
@@ -28,16 +30,17 @@ ASSIGN
      	esac;
      
      next(prod) :=
-	case
-		pc = l1 : prod + b;
-		TRUE : prod;
-	esac;
+		case
+			pc = l1 & prod + b <= prod_max : prod + b;
+			pc = l1 & prod + b > prod_max : prod_max;
+			TRUE : prod;
+		esac;
 	
      next(a) := 
-	case
-		pc = l2 & a > 0 : a - 1;
-		TRUE : a;
-	esac;
+		case
+			pc = l2 & a > 0 : a - 1;
+			TRUE : a;
+		esac;
      next(b) := b;
 
 -- Invariants: variables stay in range
@@ -47,6 +50,9 @@ INVARSPEC (b >= 0) & (b <= 10)
 -- CTL specs: eventually product is computed
 CTLSPEC AG ((prod = -1) -> AF (prod != -1))
 CTLSPEC AG ((a = 0) -> AF (prod = 0))
+CTLSPEC AG ((b = 0) -> AF (prod = 0))
+
+LTLSPEC (a = 0 | b = 0) -> F (prod = 0);
 
 LTLSPEC (a = 2 & b = 3) -> F (prod = 6);
 

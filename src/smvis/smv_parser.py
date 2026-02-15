@@ -42,13 +42,19 @@ class SmvTransformer(Transformer):
         return list(args)
 
     def range_type(self, args):
-        return RangeType(int(args[0]), int(args[1]))
+        # Bounds may be int (literal) or str (DEFINE reference, resolved later)
+        lo = args[0] if isinstance(args[0], str) else int(args[0])
+        hi = args[1] if isinstance(args[1], str) else int(args[1])
+        return RangeType(lo, hi)
 
     def neg_bound(self, args):
         return -args[0]
 
     def pos_bound(self, args):
         return args[0]
+
+    def ident_bound(self, args):
+        return str(args[0])
 
     # ---- Expressions: literals and references ----
     def var_ref(self, args):
@@ -230,11 +236,55 @@ class SmvTransformer(Transformer):
 _transformer = SmvTransformer()
 
 
+def _eval_const_expr(expr, defines: dict) -> int:
+    """Evaluate a constant expression (DEFINE body) to an integer."""
+    if isinstance(expr, IntLit):
+        return expr.value
+    if isinstance(expr, VarRef):
+        # Recursive DEFINE lookup
+        if expr.name in defines:
+            return _eval_const_expr(defines[expr.name], defines)
+        raise ValueError(f"Cannot resolve '{expr.name}' to an integer")
+    if isinstance(expr, BinOp):
+        l = _eval_const_expr(expr.left, defines)
+        r = _eval_const_expr(expr.right, defines)
+        ops = {"+": l + r, "-": l - r, "*": l * r, "/": l // r, "mod": l % r}
+        if expr.op in ops:
+            return ops[expr.op]
+    if isinstance(expr, UnaryOp) and expr.op == "-":
+        return -_eval_const_expr(expr.operand, defines)
+    raise ValueError(f"Cannot evaluate expression to integer: {expr}")
+
+
+def _resolve_range_bounds(model: SmvModel):
+    """Resolve DEFINE references in range bounds to integer values."""
+    for vd in model.variables.values():
+        if isinstance(vd.var_type, RangeType):
+            rt = vd.var_type
+            if isinstance(rt.lo, str):
+                if rt.lo in model.defines:
+                    rt.lo = _eval_const_expr(model.defines[rt.lo], model.defines)
+                else:
+                    raise ValueError(
+                        f"Range bound '{rt.lo}' for variable '{vd.name}' "
+                        f"is not defined"
+                    )
+            if isinstance(rt.hi, str):
+                if rt.hi in model.defines:
+                    rt.hi = _eval_const_expr(model.defines[rt.hi], model.defines)
+                else:
+                    raise ValueError(
+                        f"Range bound '{rt.hi}' for variable '{vd.name}' "
+                        f"is not defined"
+                    )
+
+
 def parse_smv(text: str) -> SmvModel:
     """Parse an SMV model string and return an SmvModel."""
     parser = _get_parser()
     tree = parser.parse(text)
     model = _transformer.transform(tree)
+    _resolve_range_bounds(model)
     return model
 
 

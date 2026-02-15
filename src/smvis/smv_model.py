@@ -16,8 +16,8 @@ class EnumType:
 
 @dataclass
 class RangeType:
-    lo: int
-    hi: int
+    lo: int | str  # str = DEFINE reference, resolved after parsing
+    hi: int | str
 
 VarType = Union[BoolType, EnumType, RangeType]
 

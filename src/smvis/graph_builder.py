@@ -202,6 +202,88 @@ def compute_concentric_positions(elements: list[dict],
     return nodes + edges
 
 
+def apply_trace_overlay(elements: list[dict],
+                        trace_states: list[dict[str, str]],
+                        state_to_dict: dict,
+                        var_names: list[str],
+                        loop_start: int | None = None) -> list[dict]:
+    """Add trace highlighting CSS classes to nodes/edges in a counterexample path.
+
+    Args:
+        elements: Existing Cytoscape elements.
+        trace_states: List of state dicts from a nuXmv trace.
+        state_to_dict: Map from state tuples to variable dicts.
+        var_names: Variable names (to exclude DEFINEs from matching).
+        loop_start: Index of loop-back state for lasso traces.
+
+    Returns:
+        Modified elements with trace-node/trace-edge classes added.
+    """
+    # Map each trace state to a node ID
+    var_set = set(var_names)
+    trace_node_ids: list[str] = []
+
+    for ts in trace_states:
+        # Only compare actual variables (skip DEFINEs)
+        trace_vars = {k: v for k, v in ts.items() if k in var_set}
+        matched_id = None
+        for state_tuple, sd in state_to_dict.items():
+            if all(_normalize_val(sd.get(k)) == _normalize_val(v)
+                   for k, v in trace_vars.items()):
+                matched_id = _state_id(state_tuple)
+                break
+        if matched_id:
+            trace_node_ids.append(matched_id)
+
+    if not trace_node_ids:
+        return elements
+
+    # Build set of trace edges (consecutive pairs)
+    trace_edges = set()
+    for i in range(len(trace_node_ids) - 1):
+        trace_edges.add((trace_node_ids[i], trace_node_ids[i + 1]))
+    # Loop-back edge
+    loop_edge = None
+    if loop_start is not None and 0 <= loop_start < len(trace_node_ids):
+        loop_edge = (trace_node_ids[-1], trace_node_ids[loop_start])
+
+    trace_set = set(trace_node_ids)
+
+    for elem in elements:
+        d = elem["data"]
+        classes = elem.get("classes", "")
+
+        if "source" not in d:
+            # Node element
+            if d["id"] in trace_set:
+                classes += " trace-node"
+                # Add step numbers
+                steps = [i for i, nid in enumerate(trace_node_ids) if nid == d["id"]]
+                elem["data"]["trace_step"] = steps[0]
+                elem["data"]["trace_label"] = ",".join(f"[{s}]" for s in steps)
+        else:
+            # Edge element
+            edge_key = (d["source"], d["target"])
+            if loop_edge and edge_key == loop_edge:
+                classes += " trace-loop"
+            elif edge_key in trace_edges:
+                classes += " trace-edge"
+
+        elem["classes"] = classes.strip()
+
+    return elements
+
+
+def _normalize_val(val) -> str:
+    """Normalize values for trace comparison (nuXmv TRUE/FALSE vs Python True/False)."""
+    s = str(val)
+    if s in ("TRUE", "True"):
+        return "True"
+    if s in ("FALSE", "False"):
+        return "False"
+    return s
+
+
 CYTO_STYLESHEET = [
     {
         "selector": "node",
@@ -264,6 +346,39 @@ CYTO_STYLESHEET = [
             "curve-style": "loop",
             "loop-direction": "-45deg",
             "loop-sweep": "90deg",
+        },
+    },
+    # Trace overlay styles (counterexample visualization)
+    {
+        "selector": "node.trace-node",
+        "style": {
+            "border-color": "#e67e22",
+            "border-width": 4,
+            "background-color": "#fdebd0",
+            "color": "#333",
+            "z-index": 999,
+            "label": "data(trace_label)",
+            "font-size": "9px",
+            "font-weight": "bold",
+        },
+    },
+    {
+        "selector": "edge.trace-edge",
+        "style": {
+            "line-color": "#e67e22",
+            "target-arrow-color": "#e67e22",
+            "width": 3,
+            "z-index": 998,
+        },
+    },
+    {
+        "selector": "edge.trace-loop",
+        "style": {
+            "line-color": "#e74c3c",
+            "line-style": "dashed",
+            "target-arrow-color": "#e74c3c",
+            "width": 3,
+            "z-index": 998,
         },
     },
 ]

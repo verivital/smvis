@@ -61,7 +61,7 @@ button:hover {
 /* Resizable panel layout */
 .main-container {
     display: flex;
-    height: calc(100vh - 60px);
+    height: calc(100vh - 310px);
 }
 
 .left-panel {
@@ -91,4 +91,32 @@ button:hover {
     overflow-y: auto;
     padding: 12px;
     min-width: 300px;
+}
+
+/* Terminal panel */
+.terminal-panel {
+    background: #1e1e1e;
+    border-top: 2px solid #3498db;
+}
+
+.terminal-output {
+    height: 180px;
+    overflow-y: auto;
+    padding: 8px 12px;
+    margin: 0;
+    color: #d4d4d4;
+    font-family: Consolas, monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    background: #1a1a1a;
+}
+
+.terminal-input {
+    display: flex;
+    align-items: center;
+    padding: 4px 12px 8px;
+    background: #1e1e1e;
+    font-family: Consolas, monospace;
+    font-size: 12px;
 }

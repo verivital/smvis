@@ -23,6 +23,7 @@ var_decl: IDENT ":" var_type ";"
 
 range_bound: "-" INT   -> neg_bound
            | INT        -> pos_bound
+           | IDENT      -> ident_bound
 
 ident_list: IDENT ("," IDENT)*
 
