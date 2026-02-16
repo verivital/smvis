@@ -5,7 +5,7 @@ from lark import Lark, Transformer, Token
 from smvis.smv_model import (
     SmvModel, VarDecl, BoolType, EnumType, RangeType,
     IntLit, BoolLit, VarRef, NextRef, BinOp, UnaryOp,
-    CaseExpr, SetExpr, TemporalUnary, SpecDecl,
+    CaseExpr, SetExpr, TemporalUnary, TemporalBinary, SpecDecl,
 )
 
 _GRAMMAR_PATH = os.path.join(os.path.dirname(__file__), "smv_grammar.lark")
@@ -152,6 +152,9 @@ class SmvTransformer(Transformer):
 
     def x_op(self, args):
         return TemporalUnary("X", args[0])
+
+    def until_op(self, args):
+        return TemporalBinary("U", args[0], args[1])
 
     # ---- Case / Set expressions ----
     def case_expr(self, args):

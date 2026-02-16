@@ -82,6 +82,7 @@ spec_default: "SPEC" expr ";"?
          | "G" not_expr                 -> g_op
          | "F" not_expr                 -> f_op
          | "X" not_expr                 -> x_op
+         | cmp_expr "U" cmp_expr        -> until_op
          | cmp_expr
 
 ?cmp_expr: arith_expr "=" arith_expr    -> eq_op

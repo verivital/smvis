@@ -17,10 +17,15 @@ from smvis.explicit_engine import explore, ExplicitResult
 from smvis.bdd_engine import build_from_explicit, BddResult, get_bdd_structure, build_truth_table
 from smvis.graph_builder import (
     build_elements, compute_concentric_positions,
-    CYTO_STYLESHEET, BDD_STYLESHEET, get_state_detail,
-    apply_trace_overlay,
+    CYTO_STYLESHEET, BDD_STYLESHEET, BUCHI_STYLESHEET, get_state_detail,
+    apply_trace_overlay, apply_repeatable_overlay,
+    build_buchi_elements, apply_lasso_overlay,
 )
+from smvis.cycle_analysis import analyze_cycles, CycleAnalysisResult
 from smvis.bdd_visualizer import get_bdd_summary, get_reduction_stats
+from smvis.ltl_buchi import build_buchi_for_spec, negate_ltl, simplify_ltl, UnsupportedLTLPattern
+from smvis.product_model import compose as compose_product
+from smvis.accepting_cycles import find_accepting_cycles, project_trace
 from smvis.nuxmv_runner import (
     run_batch_check, nuxmv_available, NuxmvSession, write_temp_model,
     _NUXMV_PATH,
@@ -33,7 +38,7 @@ _nuxmv_session: NuxmvSession | None = None
 _nuxmv_temp_path: str | None = None
 
 # Result cache keyed by SHA-256 of SMV text to avoid recomputation
-_compute_cache: dict[str, tuple[ExplicitResult, BddResult]] = {}
+_compute_cache: dict[str, tuple[ExplicitResult, BddResult, CycleAnalysisResult]] = {}
 _CACHE_MAX = 10
 
 
@@ -41,13 +46,14 @@ def _cache_key(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _get_cached(text: str) -> tuple[ExplicitResult, BddResult] | None:
+def _get_cached(text: str) -> tuple[ExplicitResult, BddResult, CycleAnalysisResult] | None:
     return _compute_cache.get(_cache_key(text))
 
 
-def _put_cached(text: str, explicit: ExplicitResult, bdd: BddResult):
+def _put_cached(text: str, explicit: ExplicitResult, bdd: BddResult,
+                cycle: CycleAnalysisResult):
     key = _cache_key(text)
-    _compute_cache[key] = (explicit, bdd)
+    _compute_cache[key] = (explicit, bdd, cycle)
     if len(_compute_cache) > _CACHE_MAX:
         oldest = next(iter(_compute_cache))
         del _compute_cache[oldest]
@@ -194,6 +200,31 @@ def create_app() -> dash.Dash:
                         "maxHeight": "300px", "overflowY": "auto",
                     }),
                 ]),
+
+                # LTL Buchi Analysis
+                html.Div([
+                    html.H4("LTL Buchi Analysis", style={"marginTop": "12px"}),
+                    dcc.Dropdown(
+                        id="ltl-spec-selector",
+                        options=[], value=None,
+                        placeholder="Select LTLSPEC...",
+                        style={"fontSize": "11px"},
+                        clearable=True,
+                    ),
+                    html.Div([
+                        html.Button("Compose & Analyze", id="btn-compose-buchi",
+                                    n_clicks=0, style=_btn_style("#c0392b")),
+                        html.Button("Clear", id="btn-clear-buchi",
+                                    n_clicks=0, style={
+                                        **_btn_style("#95a5a6"),
+                                        "fontSize": "11px", "padding": "4px 10px",
+                                    }),
+                    ], style={"display": "flex", "gap": "8px", "marginTop": "6px"}),
+                    html.Div(id="buchi-info", style={
+                        "fontSize": "11px", "marginTop": "8px",
+                        "maxHeight": "350px", "overflowY": "auto",
+                    }),
+                ]),
             ], className="left-panel"),
 
             # ---- Resize Handle ----
@@ -223,7 +254,10 @@ def create_app() -> dash.Dash:
                                         }),
                             dcc.Checklist(
                                 id="graph-options",
-                                options=[{"label": " Reachable only", "value": "reachable_only"}],
+                                options=[
+                                    {"label": " Reachable only", "value": "reachable_only"},
+                                    {"label": " Repeatable states", "value": "show_repeatable"},
+                                ],
                                 value=["reachable_only"],
                                 inline=True,
                                 style={"fontSize": "12px"},
@@ -260,6 +294,36 @@ def create_app() -> dash.Dash:
                                   "flexWrap": "wrap", "gap": "4px"}),
                     ], style={"display": "flex", "justifyContent": "space-between",
                               "alignItems": "center", "marginBottom": "4px"}),
+                    # Repeatable states controls (hidden until checkbox checked)
+                    html.Div(id="repeatable-controls", children=[
+                        html.Label("Mode:", style={"fontSize": "11px", "marginRight": "4px"}),
+                        dcc.Dropdown(
+                            id="repeatable-mode",
+                            options=[
+                                {"label": "R* (all repeatable)", "value": "r_star"},
+                                {"label": "R(n) layers", "value": "r_n"},
+                                {"label": "SCC coloring", "value": "scc"},
+                            ],
+                            value="r_star",
+                            clearable=False,
+                            style={"width": "160px", "fontSize": "11px"},
+                        ),
+                        html.Label("Step:", style={
+                            "fontSize": "11px", "marginLeft": "12px", "marginRight": "4px",
+                        }),
+                        html.Div(
+                            dcc.Slider(
+                                id="repeatable-step", min=1, max=10, step=1, value=1,
+                                marks={1: "1", 10: "10"},
+                                tooltip={"placement": "bottom", "always_visible": False},
+                            ),
+                            style={"flex": "1", "minWidth": "150px"},
+                        ),
+                        html.Span(id="repeatable-step-label", children="",
+                                  style={"fontSize": "11px", "marginLeft": "8px",
+                                         "whiteSpace": "nowrap"}),
+                    ], style={"display": "none", "alignItems": "center", "gap": "4px",
+                              "padding": "4px 0", "flexWrap": "wrap"}),
                     cyto.Cytoscape(
                         id="state-graph",
                         clearOnUnhover=True,
@@ -293,6 +357,19 @@ def create_app() -> dash.Dash:
                         "whiteSpace": "pre-line",
                     }),
                 ], style={"marginBottom": "12px", "position": "relative"}),
+
+                # Buchi Automaton Graph (hidden until analysis triggered)
+                html.Div(id="buchi-panel", children=[
+                    html.H4("Buchi Automaton for \u00acφ", style={"marginTop": "0"}),
+                    cyto.Cytoscape(
+                        id="buchi-graph",
+                        layout={"name": "preset", "animate": False},
+                        style={"width": "100%", "height": "180px",
+                               "border": "1px solid #ddd"},
+                        stylesheet=BUCHI_STYLESHEET,
+                        elements=[],
+                    ),
+                ], style={"display": "none", "marginBottom": "12px"}),
 
                 # BDD Section (full-width, stacked layout)
                 html.Div([
@@ -335,13 +412,17 @@ def create_app() -> dash.Dash:
             ], className="right-panel"),
         ], className="main-container"),
 
-        # ---- nuXmv Terminal Panel (bottom) ----
+        # ---- nuXmv Terminal Panel (bottom, collapsible) ----
         html.Div([
+            # Terminal header bar (always visible)
             html.Div([
-                html.Span("nuXmv Terminal", style={
-                    "fontWeight": "bold", "fontSize": "13px", "flex": "1",
-                    "color": "#ecf0f1",
-                }),
+                html.Button("\u25bc Terminal", id="btn-toggle-terminal",
+                            n_clicks=0, style={
+                                "background": "none", "border": "none",
+                                "color": "#ecf0f1", "fontWeight": "bold",
+                                "fontSize": "13px", "cursor": "pointer",
+                                "padding": "0", "flex": "1", "textAlign": "left",
+                            }),
                 html.Div([
                     html.Button("go", id="btn-cmd-go", n_clicks=0,
                                 style=_term_btn_style()),
@@ -353,7 +434,8 @@ def create_app() -> dash.Dash:
                                 style=_term_btn_style()),
                     html.Button("show_traces", id="btn-cmd-traces", n_clicks=0,
                                 style=_term_btn_style()),
-                ], style={"display": "flex", "gap": "4px", "marginRight": "8px"}),
+                ], id="terminal-quick-cmds",
+                   style={"display": "flex", "gap": "4px", "marginRight": "8px"}),
                 html.Button("Start", id="btn-terminal-start", n_clicks=0,
                             style={**_btn_style("#27ae60"), "fontSize": "11px",
                                    "padding": "3px 10px"}),
@@ -362,20 +444,25 @@ def create_app() -> dash.Dash:
                                    "padding": "3px 10px", "marginLeft": "4px"}),
             ], style={"display": "flex", "alignItems": "center",
                       "padding": "6px 12px", "backgroundColor": "#2c3e50"}),
-            html.Pre(id="terminal-output", children="", className="terminal-output"),
-            html.Div([
-                html.Span("nuXmv > ", style={"color": "#3498db", "flexShrink": "0"}),
-                dcc.Input(id="terminal-input", type="text",
-                          placeholder="Type command and press Enter...",
-                          debounce=True,
-                          style={"flex": "1", "backgroundColor": "#2d2d2d",
-                                 "color": "#d4d4d4", "border": "1px solid #555",
-                                 "fontFamily": "Consolas, monospace",
-                                 "fontSize": "12px", "padding": "4px 8px"}),
-                html.Button("Send", id="btn-terminal-send", n_clicks=0,
-                            style={**_btn_style("#3498db"), "fontSize": "11px",
-                                   "padding": "3px 10px", "marginLeft": "4px"}),
-            ], className="terminal-input"),
+            # Collapsible terminal body (hidden by default)
+            html.Div(id="terminal-body", children=[
+                html.Pre(id="terminal-output", children="",
+                         className="terminal-output"),
+                html.Div([
+                    html.Span("nuXmv > ", style={"color": "#3498db",
+                                                   "flexShrink": "0"}),
+                    dcc.Input(id="terminal-input", type="text",
+                              placeholder="Type command and press Enter...",
+                              debounce=True,
+                              style={"flex": "1", "backgroundColor": "#2d2d2d",
+                                     "color": "#d4d4d4", "border": "1px solid #555",
+                                     "fontFamily": "Consolas, monospace",
+                                     "fontSize": "12px", "padding": "4px 8px"}),
+                    html.Button("Send", id="btn-terminal-send", n_clicks=0,
+                                style={**_btn_style("#3498db"), "fontSize": "11px",
+                                       "padding": "3px 10px", "marginLeft": "4px"}),
+                ], className="terminal-input"),
+            ], style={"display": "none"}),
             dcc.Interval(id="terminal-poll", interval=500, disabled=True),
         ], className="terminal-panel", id="terminal-panel"),
 
@@ -385,6 +472,8 @@ def create_app() -> dash.Dash:
         dcc.Store(id="bdd-result-store", data=None),
         dcc.Store(id="traces-store", data=None),
         dcc.Store(id="active-trace-store", data=None),
+        dcc.Store(id="cycle-result-store", data=None),
+        dcc.Store(id="ltl-specs-store", data=None),
     ], style={"fontFamily": "Segoe UI, Arial, sans-serif"})
 
     # ================================================================
@@ -452,6 +541,9 @@ def create_app() -> dash.Dash:
         Output("bdd-graph", "layout"),
         Output("bdd-info", "children"),
         Output("bdd-selector", "options"),
+        Output("cycle-result-store", "data"),
+        Output("repeatable-step", "max"),
+        Output("repeatable-step", "marks"),
         Input("btn-compute", "n_clicks"),
         State("smv-editor", "value"),
         State("graph-options", "value"),
@@ -465,7 +557,7 @@ def create_app() -> dash.Dash:
         _log_callback("compute_all", {"graph_opts": graph_opts, "layout": layout,
                                        "max_nodes": max_nodes, "bdd_sel": bdd_sel})
         if not n or not text:
-            return (no_update,) * 8
+            return (no_update,) * 11
         try:
             model = parse_smv(text)
             # Explicit exploration
@@ -478,15 +570,24 @@ def create_app() -> dash.Dash:
                 explicit_result.var_names,
                 explicit_result.state_to_dict,
             )
+            # Cycle analysis
+            cycle_result = analyze_cycles(explicit_result)
+
             # Build visualizations
             reachable_only = "reachable_only" in (graph_opts or [])
+            show_repeatable = "show_repeatable" in (graph_opts or [])
             graph_elements = build_elements(
                 explicit_result,
                 reachable_only=reachable_only,
                 max_nodes=max_nodes or 500,
                 filter_expr=filter_expr or "",
             )
-            stats = _build_stats(explicit_result, bdd_result)
+            if show_repeatable:
+                graph_elements = apply_repeatable_overlay(
+                    graph_elements, cycle_result, mode="r_star"
+                )
+
+            stats = _build_stats(explicit_result, bdd_result, cycle_result)
             bdd_elements, bdd_info = _build_bdd_view(bdd_result, bdd_sel or "reached")
             bdd_layout = {"name": "preset", "animate": False}
 
@@ -504,14 +605,21 @@ def create_app() -> dash.Dash:
                 })
 
             # Cache results for other callbacks
-            _put_cached(text, explicit_result, bdd_result)
+            _put_cached(text, explicit_result, bdd_result, cycle_result)
 
             # Serialize for store (lightweight)
             explicit_data = _serialize_explicit(explicit_result)
             bdd_data = {"total_reachable": bdd_result.total_reachable}
 
+            # Cycle analysis store data
+            conv = cycle_result.convergence_step if cycle_result.convergence_step > 0 else 1
+            cycle_data = {"convergence_step": conv}
+            slider_max = max(conv, 1)
+            slider_marks = _build_slider_marks(slider_max)
+
             return (explicit_data, bdd_data, stats, graph_elements,
-                    bdd_elements, bdd_layout, bdd_info, bdd_options)
+                    bdd_elements, bdd_layout, bdd_info, bdd_options,
+                    cycle_data, slider_max, slider_marks)
         except Exception as e:
             _log_callback("compute_all", {"bdd_sel": bdd_sel}, error=str(e))
             log.exception("Error in compute_all callback")
@@ -519,7 +627,8 @@ def create_app() -> dash.Dash:
                 html.Span(f"Error: {e}", style={"color": "#e74c3c"}),
                 html.Pre(traceback.format_exc(), style={"fontSize": "10px"}),
             ])
-            return None, None, err_msg, [], [], no_update, str(e), no_update
+            return (None, None, err_msg, [], [], no_update, str(e), no_update,
+                    None, no_update, no_update)
 
     @app.callback(
         Output("state-graph", "elements", allow_duplicate=True),
@@ -528,29 +637,41 @@ def create_app() -> dash.Dash:
         Input("state-filter", "value"),
         Input("layout-selector", "value"),
         Input("max-nodes", "value"),
+        Input("repeatable-mode", "value"),
+        Input("repeatable-step", "value"),
         State("explicit-result-store", "data"),
         State("smv-editor", "value"),
         prevent_initial_call=True,
     )
-    def update_graph(graph_opts, filter_expr, layout, max_nodes, explicit_data, text):
+    def update_graph(graph_opts, filter_expr, layout, max_nodes,
+                     rep_mode, rep_step, explicit_data, text):
         _log_callback("update_graph", {"graph_opts": graph_opts, "layout": layout,
-                                        "max_nodes": max_nodes, "filter": filter_expr})
+                                        "max_nodes": max_nodes, "filter": filter_expr,
+                                        "rep_mode": rep_mode, "rep_step": rep_step})
         if not explicit_data or not text:
             return no_update, no_update
         try:
             cached = _get_cached(text)
             if cached:
-                explicit_result, _ = cached
+                explicit_result, _, cycle_result = cached
             else:
                 model = parse_smv(text)
                 explicit_result = explore(model)
+                cycle_result = analyze_cycles(explicit_result)
             reachable_only = "reachable_only" in (graph_opts or [])
+            show_repeatable = "show_repeatable" in (graph_opts or [])
             elements = build_elements(
                 explicit_result,
                 reachable_only=reachable_only,
                 max_nodes=max_nodes or 500,
                 filter_expr=filter_expr or "",
             )
+            if show_repeatable:
+                elements = apply_repeatable_overlay(
+                    elements, cycle_result,
+                    mode=rep_mode or "r_star",
+                    step_n=rep_step or 1,
+                )
             layout_dict = {"name": layout or "cose", "animate": False}
             if layout == "cose":
                 layout_dict["nodeRepulsion"] = 8000
@@ -583,7 +704,7 @@ def create_app() -> dash.Dash:
         try:
             cached = _get_cached(text)
             if cached:
-                _, bdd_result = cached
+                _, bdd_result, _ = cached
             else:
                 model = parse_smv(text)
                 explicit_result = explore(model)
@@ -614,7 +735,7 @@ def create_app() -> dash.Dash:
         try:
             cached = _get_cached(text)
             if cached:
-                result, _ = cached
+                result, _, _ = cached
             else:
                 model = parse_smv(text)
                 result = explore(model)
@@ -847,7 +968,7 @@ def create_app() -> dash.Dash:
         cached = _get_cached(text)
         if not cached:
             return no_update
-        explicit_result, _ = cached
+        explicit_result, _, _ = cached
         reachable_only = "reachable_only" in (graph_opts or [])
         elements = build_elements(
             explicit_result,
@@ -879,6 +1000,120 @@ def create_app() -> dash.Dash:
         if not n:
             return no_update
         return None
+
+    # ---- Repeatable controls visibility ----
+    @app.callback(
+        Output("repeatable-controls", "style"),
+        Input("graph-options", "value"),
+    )
+    def toggle_repeatable_controls(graph_opts):
+        show = "show_repeatable" in (graph_opts or [])
+        return {"display": "flex" if show else "none",
+                "alignItems": "center", "gap": "4px",
+                "padding": "4px 0", "flexWrap": "wrap"}
+
+    # ---- Repeatable step label ----
+    @app.callback(
+        Output("repeatable-step-label", "children"),
+        Input("repeatable-step", "value"),
+        State("cycle-result-store", "data"),
+    )
+    def update_step_label(step_n, cycle_data):
+        if not cycle_data:
+            return ""
+        conv = cycle_data.get("convergence_step", 0)
+        return f"R({step_n}) / R({conv})"
+
+    # ---- LTL Buchi: Populate LTLSPEC dropdown ----
+    @app.callback(
+        Output("ltl-spec-selector", "options"),
+        Output("ltl-specs-store", "data"),
+        Input("parsed-model-store", "data"),
+        State("smv-editor", "value"),
+        prevent_initial_call=True,
+    )
+    def populate_ltl_specs(model_data, text):
+        if not model_data or not text:
+            return [], None
+        try:
+            model = parse_smv(text)
+            options = []
+            specs_data = []
+            for i, spec in enumerate(model.specs):
+                if spec.kind == "LTLSPEC":
+                    label = expr_to_str(spec.expr)
+                    if len(label) > 60:
+                        label = label[:57] + "..."
+                    options.append({"label": f"[{i}] {label}", "value": i})
+                    specs_data.append({"index": i, "text": expr_to_str(spec.expr)})
+            return options, specs_data
+        except Exception:
+            return [], None
+
+    # ---- LTL Buchi: Compose & Analyze ----
+    @app.callback(
+        Output("buchi-info", "children"),
+        Output("buchi-graph", "elements"),
+        Output("buchi-panel", "style"),
+        Output("state-graph", "elements", allow_duplicate=True),
+        Input("btn-compose-buchi", "n_clicks"),
+        State("ltl-spec-selector", "value"),
+        State("smv-editor", "value"),
+        State("graph-options", "value"),
+        State("state-filter", "value"),
+        State("max-nodes", "value"),
+        prevent_initial_call=True,
+    )
+    def compose_and_analyze(n, spec_idx, text, graph_opts, filter_expr, max_nodes):
+        _log_callback("compose_and_analyze", {"spec_idx": spec_idx})
+        if not n or spec_idx is None or not text:
+            return no_update, no_update, no_update, no_update
+        try:
+            return _run_buchi_analysis(
+                spec_idx, text, graph_opts, filter_expr, max_nodes,
+            )
+        except Exception as e:
+            _log_callback("compose_and_analyze", {"spec_idx": spec_idx}, error=str(e))
+            log.exception("Error in compose_and_analyze")
+            err = html.Div([
+                html.Span(f"Error: {e}", style={"color": "#e74c3c"}),
+                html.Pre(traceback.format_exc(),
+                         style={"fontSize": "10px", "maxHeight": "150px",
+                                "overflow": "auto"}),
+            ])
+            return err, no_update, no_update, no_update
+
+    # ---- LTL Buchi: Clear ----
+    @app.callback(
+        Output("buchi-info", "children", allow_duplicate=True),
+        Output("buchi-graph", "elements", allow_duplicate=True),
+        Output("buchi-panel", "style", allow_duplicate=True),
+        Input("btn-clear-buchi", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def clear_buchi(n):
+        if not n:
+            return no_update, no_update, no_update
+        return "", [], {"display": "none", "marginBottom": "12px"}
+
+    # ---- Terminal: Toggle visibility ----
+    @app.callback(
+        Output("terminal-body", "style"),
+        Output("btn-toggle-terminal", "children"),
+        Output("terminal-quick-cmds", "style"),
+        Input("btn-toggle-terminal", "n_clicks"),
+        State("terminal-body", "style"),
+        prevent_initial_call=True,
+    )
+    def toggle_terminal(n, current_style):
+        if not n:
+            return no_update, no_update, no_update
+        visible = current_style.get("display", "none") != "none"
+        if visible:
+            return ({"display": "none"}, "\u25b6 Terminal",
+                    {"display": "none", "gap": "4px", "marginRight": "8px"})
+        return ({"display": "block"}, "\u25bc Terminal",
+                {"display": "flex", "gap": "4px", "marginRight": "8px"})
 
     # ---- Terminal: Start Session ----
     @app.callback(
@@ -1072,9 +1307,10 @@ def _build_summary(model: SmvModel) -> html.Div:
     return html.Div(rows)
 
 
-def _build_stats(explicit: ExplicitResult, bdd: BddResult) -> html.Div:
+def _build_stats(explicit: ExplicitResult, bdd: BddResult,
+                  cycle: CycleAnalysisResult | None = None) -> html.Div:
     """Build the statistics comparison panel."""
-    return html.Div([
+    items = [
         html.H5("Explicit-State", style={"margin": "4px 0"}),
         html.Div(f"Total states: {explicit.total_states}"),
         html.Div(f"Initial states: {len(explicit.initial_states)}"),
@@ -1101,7 +1337,21 @@ def _build_stats(explicit: ExplicitResult, bdd: BddResult) -> html.Div:
             style={"color": "#27ae60" if len(explicit.reachable_states) == bdd.total_reachable
                    else "#e74c3c",
                    "fontWeight": "bold"}),
-    ])
+    ]
+
+    if cycle:
+        items.extend([
+            html.Hr(style={"margin": "8px 0"}),
+            html.H5("Cycle Analysis", style={"margin": "4px 0"}),
+            html.Div(f"Non-trivial SCCs: {len(cycle.nontrivial_sccs)}"),
+            html.Div(f"Repeatable (R*): {len(cycle.r_star)} / "
+                      f"{len(cycle.r_star) + len(cycle.transient_states)}"),
+            html.Div(f"Transient: {len(cycle.transient_states)}"),
+            html.Div(f"R(1) self-loops: {len(cycle.r_sets.get(1, set()))}"),
+            html.Div(f"Convergence: R({cycle.convergence_step})"),
+        ])
+
+    return html.Div(items)
 
 
 def _build_bdd_view(bdd_result: BddResult, selector: str) -> tuple[list, html.Div]:
@@ -1229,6 +1479,21 @@ def _serialize_model(model: SmvModel) -> dict:
     }
 
 
+def _build_slider_marks(max_val: int) -> dict:
+    """Build slider marks for the R(n) step slider."""
+    marks = {1: "1"}
+    if max_val <= 10:
+        for i in range(1, max_val + 1):
+            marks[i] = str(i)
+    else:
+        # Show key marks only to avoid crowding
+        marks[max_val] = str(max_val)
+        step = max(1, max_val // 5)
+        for i in range(step, max_val, step):
+            marks[i] = str(i)
+    return marks
+
+
 def _serialize_explicit(result: ExplicitResult) -> dict:
     """Serialize explicit result summary for dcc.Store."""
     return {
@@ -1239,3 +1504,190 @@ def _serialize_explicit(result: ExplicitResult) -> dict:
         "n_transitions": len(result.transitions),
         "n_bfs_layers": len(result.bfs_layers),
     }
+
+
+def _run_buchi_analysis(spec_idx, text, graph_opts, filter_expr, max_nodes):
+    """Run the full LTL Buchi analysis pipeline.
+
+    Returns (buchi_info, buchi_elements, buchi_panel_style, graph_elements).
+    """
+    model = parse_smv(text)
+
+    # 1. Get the selected LTLSPEC
+    ltl_specs = [s for s in model.specs if s.kind == "LTLSPEC"]
+    spec = None
+    for s in model.specs:
+        if s.kind == "LTLSPEC" and model.specs.index(s) == spec_idx:
+            spec = s
+            break
+    if spec is None:
+        return (html.Div("No LTLSPEC found at that index.",
+                         style={"color": "#e74c3c"}),
+                no_update, no_update, no_update)
+
+    info_items = []
+    original_text = expr_to_str(spec.expr)
+    info_items.append(html.Div([
+        html.B("1. Original: "), html.Span(f"\u03c6 = {original_text}"),
+    ], style={"marginBottom": "4px"}))
+
+    # 2. Negate and build Buchi
+    negated = simplify_ltl(negate_ltl(spec.expr))
+    negated_text = expr_to_str(negated)
+    info_items.append(html.Div([
+        html.B("2. Negated: "), html.Span(f"\u00ac\u03c6 = {negated_text}"),
+    ], style={"marginBottom": "4px"}))
+
+    try:
+        buchi = build_buchi_for_spec(spec)
+    except UnsupportedLTLPattern as e:
+        info_items.append(html.Div([
+            html.B("Error: "),
+            html.Span(f"Unsupported LTL pattern: {e}",
+                      style={"color": "#e74c3c"}),
+        ]))
+        return (html.Div(info_items), [], {"display": "none", "marginBottom": "12px"},
+                no_update)
+
+    n_states = len(buchi.states)
+    n_trans = len(buchi.transitions)
+    acc_names = ", ".join(buchi.accepting)
+    info_items.append(html.Div([
+        html.B("3. Buchi for \u00ac\u03c6: "),
+        html.Span(f"{n_states} states, {n_trans} transitions, "
+                   f"accepting: {{{acc_names}}}"),
+    ], style={"marginBottom": "4px"}))
+
+    # Build Buchi graph elements
+    buchi_elements = build_buchi_elements(buchi)
+
+    # 3. Compose product
+    product_info = compose_product(model, buchi)
+    product_model = product_info.product_model
+
+    # 4. Explore product
+    product_result = explore(product_model)
+    n_reachable = len(product_result.reachable_states)
+    n_total = product_result.total_states
+    info_items.append(html.Div([
+        html.B("4. Product: "),
+        html.Span(f"{n_total} total, {n_reachable} reachable"),
+    ], style={"marginBottom": "4px"}))
+
+    # 5. Cycle analysis on product
+    product_cycles = analyze_cycles(product_result)
+
+    # 6. Find accepting cycles
+    accepting = find_accepting_cycles(product_result, product_cycles, product_info)
+
+    if accepting.has_accepting_cycle:
+        n_acc_sccs = len(accepting.accepting_sccs)
+        acc_scc_sizes = ", ".join(str(len(s)) for s in accepting.accepting_sccs)
+        info_items.append(html.Div([
+            html.B("5. Accepting cycles: "),
+            html.Span("FOUND ", style={"color": "#e74c3c", "fontWeight": "bold"}),
+            html.Span(f"(property VIOLATED)"),
+        ], style={"marginBottom": "2px"}))
+        info_items.append(html.Div(
+            f"   Accepting SCCs: {n_acc_sccs} ({acc_scc_sizes} states)",
+            style={"paddingLeft": "16px", "marginBottom": "4px"},
+        ))
+    else:
+        info_items.append(html.Div([
+            html.B("5. Accepting cycles: "),
+            html.Span("NONE ", style={"color": "#27ae60", "fontWeight": "bold"}),
+            html.Span(f"(property HOLDS)"),
+        ], style={"marginBottom": "4px"}))
+
+    # 7. Lasso extraction + visualization on ORIGINAL graph
+    graph_elements = no_update
+    if accepting.lasso:
+        prefix, cycle = accepting.lasso
+        info_items.append(html.Div([
+            html.B("6. Lasso: "),
+            html.Span(f"prefix {len(prefix)} states + cycle {len(cycle)} states"),
+        ], style={"marginBottom": "4px"}))
+
+        # Project lasso to original model variables
+        proj_prefix, proj_cycle = project_trace(accepting.lasso, product_info)
+
+        # Build original model graph and overlay the projected lasso
+        cached = _get_cached(text)
+        if cached:
+            orig_explicit, _, _ = cached
+        else:
+            orig_explicit = explore(model)
+        reachable_only = "reachable_only" in (graph_opts or [])
+        graph_elements = build_elements(
+            orig_explicit,
+            reachable_only=reachable_only,
+            max_nodes=max_nodes or 500,
+            filter_expr=filter_expr or "",
+        )
+        # Build projected lasso as state tuples for overlay
+        proj_prefix_tuples = _dicts_to_tuples(proj_prefix, orig_explicit.var_names)
+        proj_cycle_tuples = _dicts_to_tuples(proj_cycle, orig_explicit.var_names)
+        projected_lasso = (proj_prefix_tuples, proj_cycle_tuples)
+        graph_elements = apply_lasso_overlay(
+            graph_elements, projected_lasso, orig_explicit,
+        )
+
+        # Show projected lasso trace details
+        info_items.append(html.Div([
+            html.B("Counterexample (projected):"),
+        ], style={"marginTop": "6px", "marginBottom": "2px"}))
+
+        # Prefix
+        if proj_prefix:
+            info_items.append(html.Div("Prefix:", style={
+                "fontWeight": "bold", "paddingLeft": "8px", "fontSize": "10px",
+            }))
+            for i, sd in enumerate(proj_prefix):
+                vals = ", ".join(f"{k}={v}" for k, v in sd.items())
+                info_items.append(html.Div(
+                    f"  [{i}] {vals}",
+                    style={"paddingLeft": "16px", "fontSize": "10px",
+                           "fontFamily": "Consolas, monospace"},
+                ))
+
+        # Cycle
+        if proj_cycle:
+            info_items.append(html.Div("Cycle:", style={
+                "fontWeight": "bold", "paddingLeft": "8px", "fontSize": "10px",
+            }))
+            for i, sd in enumerate(proj_cycle):
+                vals = ", ".join(f"{k}={v}" for k, v in sd.items())
+                info_items.append(html.Div(
+                    f"  [{i}] {vals}",
+                    style={"paddingLeft": "16px", "fontSize": "10px",
+                           "fontFamily": "Consolas, monospace"},
+                ))
+
+    # Result summary box
+    if accepting.property_holds:
+        result_style = {
+            "backgroundColor": "#d4edda", "color": "#155724",
+            "padding": "6px 10px", "borderRadius": "4px",
+            "marginTop": "8px", "fontWeight": "bold",
+        }
+        result_text = f"\u2713 {original_text}"
+    else:
+        result_style = {
+            "backgroundColor": "#f8d7da", "color": "#721c24",
+            "padding": "6px 10px", "borderRadius": "4px",
+            "marginTop": "8px", "fontWeight": "bold",
+        }
+        result_text = f"\u2717 {original_text}"
+    info_items.append(html.Div(result_text, style=result_style))
+
+    buchi_panel_style = {"display": "block", "marginBottom": "12px"}
+
+    return (html.Div(info_items), buchi_elements, buchi_panel_style, graph_elements)
+
+
+def _dicts_to_tuples(state_dicts: list[dict], var_names: list[str]) -> list[tuple]:
+    """Convert list of state dicts to list of state tuples for graph overlay."""
+    tuples = []
+    for sd in state_dicts:
+        tuples.append(tuple(sd.get(v) for v in var_names))
+    return tuples

@@ -1,0 +1,18 @@
+-- Deterministic 2-bit counter: cycles through 00 -> 01 -> 10 -> 11 -> 00.
+-- 4 reachable states, ideal for demonstrating LTL Buchi composition.
+MODULE main
+  VAR
+    b0 : boolean;
+    b1 : boolean;
+  ASSIGN
+    init(b0) := FALSE;
+    init(b1) := FALSE;
+    next(b0) := !b0;
+    next(b1) := case
+      b0 : !b1;
+      TRUE : b1;
+    esac;
+
+LTLSPEC G F(b0 & b1)       -- passes: state 11 visited every 4 steps
+LTLSPEC F G(b0 & b1)       -- fails: counter cycles, can't stay at 11
+LTLSPEC G(b0 & b1 -> F(!b0 & !b1))  -- passes: from 11, always reaches 00

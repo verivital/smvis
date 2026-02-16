@@ -2,6 +2,8 @@
 from __future__ import annotations
 import math
 from smvis.explicit_engine import ExplicitResult, State
+from smvis.cycle_analysis import CycleAnalysisResult
+from smvis.smv_model import expr_to_str
 
 
 def build_elements(result: ExplicitResult,
@@ -274,6 +276,116 @@ def apply_trace_overlay(elements: list[dict],
     return elements
 
 
+def apply_repeatable_overlay(
+    elements: list[dict],
+    cycle_result: CycleAnalysisResult,
+    mode: str = "r_star",
+    step_n: int = 1,
+) -> list[dict]:
+    """Add repeatable-state CSS classes to Cytoscape elements.
+
+    Args:
+        elements: Existing Cytoscape elements.
+        cycle_result: Result from cycle analysis.
+        mode: Visualization mode.
+            "r_star" — All repeatable nodes purple, transient gray, cycle edges highlighted.
+            "r_n"   — Cumulative view: slider at step k shows R(1) | ... | R(k).
+                       Nodes colored by min return time (heat map).
+            "scc"   — Color by SCC membership (8 rotating colors).
+        step_n: Current slider step for r_n mode.
+
+    Returns:
+        Modified elements with overlay classes added.
+    """
+    # Build lookup: state tuple -> SCC id and min return time
+    # We need to map node IDs back to state tuples
+    r_star = cycle_result.r_star
+    transient = cycle_result.transient_states
+    min_rt = cycle_result.min_return_time
+    scc_id_map = cycle_result.state_to_scc_id
+    cumulative = cycle_result.cumulative_r
+
+    # Build set of node IDs for repeatable/transient states
+    r_star_ids: dict[str, State] = {}
+    transient_ids: set[str] = set()
+    for s in r_star:
+        r_star_ids[_state_id(s)] = s
+    for s in transient:
+        transient_ids.add(_state_id(s))
+
+    # Build cycle edge set (as node ID pairs)
+    cycle_edge_ids: set[tuple[str, str]] = set()
+    for src, dst in cycle_result.cycle_edges:
+        cycle_edge_ids.add((_state_id(src), _state_id(dst)))
+
+    # Heat map colors for R(n) layers (by min return time)
+    _HEAT_CLASSES = [
+        "repeat-1", "repeat-2", "repeat-3", "repeat-4",
+        "repeat-5", "repeat-6", "repeat-high",
+    ]
+
+    # For r_n mode, pre-compute which node IDs are "active" (in cumulative R(step_n))
+    active_ids: set[str] = set()
+    if mode == "r_n":
+        for s in r_star:
+            mrt = min_rt.get(s)
+            if mrt is not None and mrt <= step_n:
+                active_ids.add(_state_id(s))
+
+    for elem in elements:
+        d = elem["data"]
+        classes = elem.get("classes", "")
+
+        if "source" not in d:
+            # Node element
+            node_id = d["id"]
+
+            if mode == "r_star":
+                if node_id in r_star_ids:
+                    classes += " repeatable"
+                    s = r_star_ids[node_id]
+                    d["repeat_info"] = f"R({min_rt.get(s, '?')})"
+                elif node_id in transient_ids:
+                    classes += " transient"
+
+            elif mode == "r_n":
+                if node_id in r_star_ids:
+                    s = r_star_ids[node_id]
+                    mrt = min_rt.get(s)
+                    if mrt is not None and mrt <= step_n:
+                        # State is in cumulative R(step_n) — color by min return
+                        idx = min(mrt - 1, len(_HEAT_CLASSES) - 1)
+                        classes += f" {_HEAT_CLASSES[idx]}"
+                        d["repeat_info"] = f"R({mrt})"
+                    else:
+                        classes += " not-yet-repeatable"
+                elif node_id in transient_ids:
+                    classes += " transient"
+
+            elif mode == "scc":
+                if node_id in r_star_ids:
+                    s = r_star_ids[node_id]
+                    scc_idx = scc_id_map.get(s, 0) % 8
+                    classes += f" scc-{scc_idx}"
+                elif node_id in transient_ids:
+                    classes += " transient"
+
+        else:
+            # Edge element
+            edge_key = (d["source"], d["target"])
+            if mode == "r_star" and edge_key in cycle_edge_ids:
+                classes += " cycle-edge"
+            elif mode == "r_n":
+                if edge_key in cycle_edge_ids and d["source"] in active_ids and d["target"] in active_ids:
+                    classes += " cycle-edge"
+                elif d["source"] not in active_ids or d["target"] not in active_ids:
+                    classes += " faded-edge"
+
+        elem["classes"] = classes.strip()
+
+    return elements
+
+
 def _normalize_val(val) -> str:
     """Normalize values for trace comparison (nuXmv TRUE/FALSE vs Python True/False)."""
     s = str(val)
@@ -282,6 +394,110 @@ def _normalize_val(val) -> str:
     if s in ("FALSE", "False"):
         return "False"
     return s
+
+
+def build_buchi_elements(buchi) -> list[dict]:
+    """Build Cytoscape elements for a Buchi automaton visualization.
+
+    Args:
+        buchi: BuchiAutomaton from ltl_buchi module.
+
+    Returns:
+        List of Cytoscape element dicts for the small Buchi graph.
+    """
+    elements = []
+    n = len(buchi.states)
+
+    for i, state in enumerate(buchi.states):
+        classes = ["buchi-state"]
+        if state.accepting:
+            classes.append("buchi-accepting")
+        if state.name == buchi.initial:
+            classes.append("buchi-initial")
+
+        # Circle layout for 1-3 states
+        angle = 2 * math.pi * i / max(n, 1) - math.pi / 2
+        radius = 0 if n == 1 else 80
+        elements.append({
+            "data": {
+                "id": f"b_{state.name}",
+                "label": state.name,
+            },
+            "classes": " ".join(classes),
+            "position": {
+                "x": round(radius * math.cos(angle)),
+                "y": round(radius * math.sin(angle)),
+            },
+        })
+
+    for t in buchi.transitions:
+        guard_str = expr_to_str(t.guard)
+        is_self = t.src == t.dst
+        elements.append({
+            "data": {
+                "id": f"be_{t.src}_{t.dst}_{guard_str[:20]}",
+                "source": f"b_{t.src}",
+                "target": f"b_{t.dst}",
+                "label": guard_str,
+            },
+            "classes": "buchi-edge" + (" self-loop" if is_self else ""),
+        })
+
+    return elements
+
+
+def apply_lasso_overlay(
+    elements: list[dict],
+    lasso: tuple[list[State], list[State]],
+    explicit_result: ExplicitResult,
+) -> list[dict]:
+    """Highlight lasso counterexample (prefix + cycle) on graph elements.
+
+    Args:
+        elements: Existing Cytoscape elements for the product graph.
+        lasso: (prefix_states, cycle_states) tuples from accepting_cycles.
+        explicit_result: Product exploration result.
+
+    Returns:
+        Modified elements with lasso overlay classes.
+    """
+    prefix, cycle = lasso
+
+    prefix_ids = {_state_id(s) for s in prefix}
+    cycle_ids = {_state_id(s) for s in cycle}
+
+    # Build prefix edge set
+    prefix_edges: set[tuple[str, str]] = set()
+    for i in range(len(prefix) - 1):
+        prefix_edges.add((_state_id(prefix[i]), _state_id(prefix[i + 1])))
+
+    # Build cycle edge set
+    cycle_edges: set[tuple[str, str]] = set()
+    for i in range(len(cycle) - 1):
+        cycle_edges.add((_state_id(cycle[i]), _state_id(cycle[i + 1])))
+
+    for elem in elements:
+        d = elem["data"]
+        classes = elem.get("classes", "")
+
+        if "source" not in d:
+            # Node
+            nid = d["id"]
+            if nid in cycle_ids:
+                classes += " lasso-cycle"
+            elif nid in prefix_ids:
+                classes += " lasso-prefix"
+        else:
+            # Edge
+            edge_key = (d["source"], d["target"])
+            if edge_key in cycle_edges:
+                classes += " lasso-cycle-edge"
+            elif edge_key in prefix_edges:
+                classes += " lasso-prefix-edge"
+
+        elem["classes"] = classes.strip()
+
+    return elements
 
 
 CYTO_STYLESHEET = [
@@ -348,6 +564,57 @@ CYTO_STYLESHEET = [
             "loop-sweep": "90deg",
         },
     },
+    # Repeatable states: R* mode
+    {"selector": "node.repeatable", "style": {
+        "background-color": "#8e44ad", "color": "#fff",
+    }},
+    {"selector": "node.transient", "style": {
+        "background-color": "#bdc3c7", "opacity": 0.5,
+    }},
+    # Repeatable states: R(n) heat map (by min return time)
+    {"selector": "node.repeat-1", "style": {
+        "background-color": "#e74c3c", "color": "#fff",
+    }},
+    {"selector": "node.repeat-2", "style": {
+        "background-color": "#e67e22", "color": "#fff",
+    }},
+    {"selector": "node.repeat-3", "style": {
+        "background-color": "#f1c40f", "color": "#333",
+    }},
+    {"selector": "node.repeat-4", "style": {
+        "background-color": "#2ecc71", "color": "#fff",
+    }},
+    {"selector": "node.repeat-5", "style": {
+        "background-color": "#3498db", "color": "#fff",
+    }},
+    {"selector": "node.repeat-6", "style": {
+        "background-color": "#9b59b6", "color": "#fff",
+    }},
+    {"selector": "node.repeat-high", "style": {
+        "background-color": "#8e44ad", "color": "#fff",
+    }},
+    # States not yet in cumulative R(n) at current slider position
+    {"selector": "node.not-yet-repeatable", "style": {
+        "background-color": "#ddd", "opacity": 0.4,
+    }},
+    # Cycle edges (within nontrivial SCCs)
+    {"selector": "edge.cycle-edge", "style": {
+        "line-color": "#8e44ad", "target-arrow-color": "#8e44ad", "width": 2,
+    }},
+    # Faded edges (not connecting active nodes in R(n) mode)
+    {"selector": "edge.faded-edge", "style": {
+        "line-color": "#e0e0e0", "target-arrow-color": "#e0e0e0",
+        "opacity": 0.25, "width": 1,
+    }},
+    # SCC membership colors (8 rotating)
+    {"selector": "node.scc-0", "style": {"background-color": "#e74c3c", "color": "#fff"}},
+    {"selector": "node.scc-1", "style": {"background-color": "#3498db", "color": "#fff"}},
+    {"selector": "node.scc-2", "style": {"background-color": "#2ecc71", "color": "#fff"}},
+    {"selector": "node.scc-3", "style": {"background-color": "#f39c12", "color": "#fff"}},
+    {"selector": "node.scc-4", "style": {"background-color": "#9b59b6", "color": "#fff"}},
+    {"selector": "node.scc-5", "style": {"background-color": "#1abc9c", "color": "#fff"}},
+    {"selector": "node.scc-6", "style": {"background-color": "#e67e22", "color": "#fff"}},
+    {"selector": "node.scc-7", "style": {"background-color": "#34495e", "color": "#fff"}},
     # Trace overlay styles (counterexample visualization)
     {
         "selector": "node.trace-node",
@@ -381,6 +648,56 @@ CYTO_STYLESHEET = [
             "z-index": 998,
         },
     },
+    # Lasso counterexample overlay
+    {"selector": "node.lasso-cycle", "style": {
+        "background-color": "#fadbd8", "border-color": "#e74c3c",
+        "border-width": 3, "color": "#c0392b",
+    }},
+    {"selector": "node.lasso-prefix", "style": {
+        "background-color": "#fef9e7", "border-color": "#f39c12",
+        "border-width": 2, "color": "#d68910",
+    }},
+    {"selector": "edge.lasso-cycle-edge", "style": {
+        "line-color": "#e74c3c", "target-arrow-color": "#e74c3c",
+        "width": 3, "z-index": 997,
+    }},
+    {"selector": "edge.lasso-prefix-edge", "style": {
+        "line-color": "#f39c12", "target-arrow-color": "#f39c12",
+        "width": 2, "z-index": 996,
+    }},
+]
+
+
+BUCHI_STYLESHEET = [
+    {"selector": "node.buchi-state", "style": {
+        "label": "data(label)", "font-size": "11px",
+        "width": 40, "height": 40,
+        "background-color": "#d5e8d4", "color": "#333",
+        "text-valign": "center", "text-halign": "center",
+        "border-width": 2, "border-color": "#82b366",
+    }},
+    {"selector": "node.buchi-accepting", "style": {
+        "border-width": 5, "border-color": "#e74c3c",
+        "border-style": "double", "background-color": "#fadbd8",
+    }},
+    {"selector": "node.buchi-initial", "style": {
+        "border-color": "#2ecc71", "border-width": 3,
+    }},
+    {"selector": "edge.buchi-edge", "style": {
+        "label": "data(label)", "font-size": "8px",
+        "curve-style": "bezier",
+        "target-arrow-shape": "triangle",
+        "width": 2, "line-color": "#666",
+        "target-arrow-color": "#666", "arrow-scale": 1.0,
+        "text-rotation": "autorotate",
+        "text-background-color": "#fff",
+        "text-background-opacity": 0.8,
+        "text-background-padding": "2px",
+    }},
+    {"selector": "edge.buchi-edge.self-loop", "style": {
+        "curve-style": "loop",
+        "loop-direction": "-45deg", "loop-sweep": "90deg",
+    }},
 ]
 
 BDD_STYLESHEET = [

@@ -1,0 +1,21 @@
+-- Minimal request-grant arbiter for LTL model checking demonstration.
+-- A request may or may not be granted. Without fairness, requests can be
+-- ignored forever.
+MODULE main
+  VAR
+    request : boolean;
+    grant : boolean;
+  ASSIGN
+    init(request) := FALSE;
+    init(grant) := FALSE;
+    next(request) := {TRUE, FALSE};
+    next(grant) := case
+      request & !grant : {TRUE, FALSE};  -- may or may not grant
+      grant : FALSE;                      -- grant lasts 1 cycle
+      TRUE : FALSE;
+    esac;
+
+LTLSPEC G(request -> F grant)    -- fails: can ignore requests forever
+LTLSPEC G(!grant -> F !request)  -- fails: requests can persist
+LTLSPEC G(grant -> !request)     -- hmm, grant while still requesting? check
+LTLSPEC F grant                  -- fails: might never grant
