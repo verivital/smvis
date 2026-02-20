@@ -123,6 +123,14 @@ def create_app() -> dash.Dash:
                     "backgroundColor": "#7f8c8d", "color": "#fff", "border": "none",
                     "borderRadius": "3px", "cursor": "pointer",
                 }),
+                html.Button("\u25b6 Terminal", id="btn-toggle-terminal",
+                            n_clicks=0, style={
+                                "marginLeft": "16px", "fontSize": "11px",
+                                "padding": "4px 10px",
+                                "backgroundColor": "#34495e", "color": "#ecf0f1",
+                                "border": "1px solid #5a6c7d", "borderRadius": "3px",
+                                "cursor": "pointer",
+                            }),
             ], style={"display": "flex", "alignItems": "center"}),
         ], style={
             "display": "flex", "justifyContent": "space-between",
@@ -410,19 +418,15 @@ def create_app() -> dash.Dash:
                     }),
                 ]),
             ], className="right-panel"),
-        ], className="main-container"),
+        ], className="main-container", id="main-container"),
 
-        # ---- nuXmv Terminal Panel (bottom, collapsible) ----
+        # ---- nuXmv Terminal Panel (bottom, hidden by default) ----
         html.Div([
-            # Terminal header bar (always visible)
             html.Div([
-                html.Button("\u25bc Terminal", id="btn-toggle-terminal",
-                            n_clicks=0, style={
-                                "background": "none", "border": "none",
-                                "color": "#ecf0f1", "fontWeight": "bold",
-                                "fontSize": "13px", "cursor": "pointer",
-                                "padding": "0", "flex": "1", "textAlign": "left",
-                            }),
+                html.Span("nuXmv Terminal", style={
+                    "fontWeight": "bold", "fontSize": "13px", "flex": "1",
+                    "color": "#ecf0f1",
+                }),
                 html.Div([
                     html.Button("go", id="btn-cmd-go", n_clicks=0,
                                 style=_term_btn_style()),
@@ -434,8 +438,7 @@ def create_app() -> dash.Dash:
                                 style=_term_btn_style()),
                     html.Button("show_traces", id="btn-cmd-traces", n_clicks=0,
                                 style=_term_btn_style()),
-                ], id="terminal-quick-cmds",
-                   style={"display": "flex", "gap": "4px", "marginRight": "8px"}),
+                ], style={"display": "flex", "gap": "4px", "marginRight": "8px"}),
                 html.Button("Start", id="btn-terminal-start", n_clicks=0,
                             style={**_btn_style("#27ae60"), "fontSize": "11px",
                                    "padding": "3px 10px"}),
@@ -444,27 +447,25 @@ def create_app() -> dash.Dash:
                                    "padding": "3px 10px", "marginLeft": "4px"}),
             ], style={"display": "flex", "alignItems": "center",
                       "padding": "6px 12px", "backgroundColor": "#2c3e50"}),
-            # Collapsible terminal body (hidden by default)
-            html.Div(id="terminal-body", children=[
-                html.Pre(id="terminal-output", children="",
-                         className="terminal-output"),
-                html.Div([
-                    html.Span("nuXmv > ", style={"color": "#3498db",
-                                                   "flexShrink": "0"}),
-                    dcc.Input(id="terminal-input", type="text",
-                              placeholder="Type command and press Enter...",
-                              debounce=True,
-                              style={"flex": "1", "backgroundColor": "#2d2d2d",
-                                     "color": "#d4d4d4", "border": "1px solid #555",
-                                     "fontFamily": "Consolas, monospace",
-                                     "fontSize": "12px", "padding": "4px 8px"}),
-                    html.Button("Send", id="btn-terminal-send", n_clicks=0,
-                                style={**_btn_style("#3498db"), "fontSize": "11px",
-                                       "padding": "3px 10px", "marginLeft": "4px"}),
-                ], className="terminal-input"),
-            ], style={"display": "none"}),
+            html.Pre(id="terminal-output", children="",
+                     className="terminal-output"),
+            html.Div([
+                html.Span("nuXmv > ", style={"color": "#3498db",
+                                               "flexShrink": "0"}),
+                dcc.Input(id="terminal-input", type="text",
+                          placeholder="Type command and press Enter...",
+                          debounce=True,
+                          style={"flex": "1", "backgroundColor": "#2d2d2d",
+                                 "color": "#d4d4d4", "border": "1px solid #555",
+                                 "fontFamily": "Consolas, monospace",
+                                 "fontSize": "12px", "padding": "4px 8px"}),
+                html.Button("Send", id="btn-terminal-send", n_clicks=0,
+                            style={**_btn_style("#3498db"), "fontSize": "11px",
+                                   "padding": "3px 10px", "marginLeft": "4px"}),
+            ], className="terminal-input"),
             dcc.Interval(id="terminal-poll", interval=500, disabled=True),
-        ], className="terminal-panel", id="terminal-panel"),
+        ], className="terminal-panel", id="terminal-panel",
+           style={"display": "none"}),
 
         # ---- Hidden Stores ----
         dcc.Store(id="parsed-model-store", data=None),
@@ -1098,22 +1099,38 @@ def create_app() -> dash.Dash:
 
     # ---- Terminal: Toggle visibility ----
     @app.callback(
-        Output("terminal-body", "style"),
+        Output("terminal-panel", "style"),
+        Output("main-container", "style"),
         Output("btn-toggle-terminal", "children"),
-        Output("terminal-quick-cmds", "style"),
+        Output("btn-toggle-terminal", "style"),
         Input("btn-toggle-terminal", "n_clicks"),
-        State("terminal-body", "style"),
+        State("terminal-panel", "style"),
         prevent_initial_call=True,
     )
     def toggle_terminal(n, current_style):
         if not n:
-            return no_update, no_update, no_update
-        visible = current_style.get("display", "none") != "none"
+            return no_update, no_update, no_update, no_update
+        visible = (current_style or {}).get("display", "none") != "none"
+        btn_base = {
+            "marginLeft": "16px", "fontSize": "11px", "padding": "4px 10px",
+            "border": "1px solid #5a6c7d", "borderRadius": "3px",
+            "cursor": "pointer",
+        }
         if visible:
-            return ({"display": "none"}, "\u25b6 Terminal",
-                    {"display": "none", "gap": "4px", "marginRight": "8px"})
-        return ({"display": "block"}, "\u25bc Terminal",
-                {"display": "flex", "gap": "4px", "marginRight": "8px"})
+            # Hide terminal, reclaim space
+            return (
+                {"display": "none"},
+                {"display": "flex", "height": "calc(100vh - 60px)"},
+                "\u25b6 Terminal",
+                {**btn_base, "backgroundColor": "#34495e", "color": "#ecf0f1"},
+            )
+        # Show terminal
+        return (
+            {"display": "block"},
+            {"display": "flex", "height": "calc(100vh - 310px)"},
+            "\u25bc Terminal",
+            {**btn_base, "backgroundColor": "#27ae60", "color": "#fff"},
+        )
 
     # ---- Terminal: Start Session ----
     @app.callback(
