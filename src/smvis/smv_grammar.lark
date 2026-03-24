@@ -1,8 +1,12 @@
 // Lark LALR(1) grammar for the nuXmv/NuSMV subset used in EECS 6315 models
+// Supports multi-module models with process instantiation
 
-start: module_decl section*
+start: module+
 
-module_decl: "MODULE" "main"
+module: "MODULE" module_header section*
+
+module_header: IDENT "(" ident_list ")"    -> param_header
+             | IDENT                        -> simple_header
 
 ?section: var_section
         | define_section
@@ -17,9 +21,11 @@ module_decl: "MODULE" "main"
 var_section: "VAR" var_decl+
 var_decl: IDENT ":" var_type ";"
 
-?var_type: "boolean"                        -> bool_type
-         | "{" ident_list "}"               -> enum_type
-         | range_bound ".." range_bound     -> range_type
+?var_type: "boolean"                                 -> bool_type
+         | "{" ident_list "}"                        -> enum_type
+         | range_bound ".." range_bound              -> range_type
+         | "process" IDENT "(" ident_list ")"        -> process_type
+         | "process" IDENT "(" ")"                   -> process_type_noargs
 
 range_bound: "-" INT   -> neg_bound
            | INT        -> pos_bound
@@ -111,7 +117,8 @@ spec_default: "SPEC" expr ";"?
        | IDENT                          -> var_ref
 
 // ---- Terminals ----
-IDENT: /[a-zA-Z_][a-zA-Z0-9_]*/
+// Dotted identifiers support qualified references (e.g., proc1.state)
+IDENT: /[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*/
 INT: /[0-9]+/
 
 %ignore /\s+/

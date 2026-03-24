@@ -1,0 +1,43 @@
+MODULE main
+VAR
+  semaphore : boolean;
+  proc1 : process user(semaphore);
+  proc2 : process user(semaphore);
+ASSIGN
+  init(semaphore) := FALSE;
+
+-- mutual exclusion: it is always the case
+-- that there is at most one process in the
+-- critical section
+LTLSPEC G ! (proc1.state = critical & proc2.state = critical)
+
+-- liveness: it is always the case that, if
+-- process 1 is in entering, then in the
+-- future it will be in the critical
+-- section
+LTLSPEC G (proc1.state = entering -> F proc1.state = critical)
+
+
+MODULE user(semaphore)
+  VAR
+    state : {idle, entering, critical, exiting};
+  ASSIGN
+    init(state) := idle;
+
+    next(state) :=
+    case
+      state = idle : {idle, entering};
+      state = entering & !semaphore : critical;
+      state = critical : {critical, exiting};
+      state = exiting : idle;
+      TRUE : state;
+     esac;
+
+    next(semaphore) :=
+    case
+      state = entering : TRUE;
+      state = exiting : FALSE;
+      TRUE : semaphore;
+    esac;
+  FAIRNESS
+    running

@@ -12,6 +12,7 @@ dependencies = [
     "dd>=0.5",
     "dash>=2.14",
     "dash-cytoscape>=1.0",
+    "z3-solver>=4.8",
 ]
 
 [project.optional-dependencies]

@@ -31,6 +31,14 @@ from smvis.nuxmv_runner import (
     _NUXMV_PATH,
 )
 
+try:
+    from smvis.bmc_engine import (
+        run_bmc, run_bmc_all_specs, is_safety_spec, BmcResult,
+    )
+    _Z3_AVAILABLE = True
+except ImportError:
+    _Z3_AVAILABLE = False
+
 log = logging.getLogger("smvis")
 
 # Module-level nuXmv interactive session (one per server instance)
@@ -232,6 +240,55 @@ def create_app() -> dash.Dash:
                         "fontSize": "11px", "marginTop": "8px",
                         "maxHeight": "350px", "overflowY": "auto",
                     }),
+                ]),
+
+                # Bounded Model Checking
+                html.Div([
+                    html.H4("Bounded Model Checking (Z3)", style={"marginTop": "12px"}),
+                    html.Div([
+                        html.Label("Max k:", style={
+                            "fontSize": "11px", "marginRight": "4px"}),
+                        dcc.Input(
+                            id="bmc-max-k", type="number", value=20,
+                            min=1, max=100,
+                            style={"width": "55px", "fontSize": "12px"},
+                        ),
+                        html.Label("Timeout (s):", style={
+                            "fontSize": "11px", "marginLeft": "12px",
+                            "marginRight": "4px"}),
+                        dcc.Input(
+                            id="bmc-timeout", type="number", value=30,
+                            min=1, max=300,
+                            style={"width": "55px", "fontSize": "12px"},
+                        ),
+                    ], style={"display": "flex", "alignItems": "center",
+                              "gap": "4px", "marginBottom": "6px"}),
+                    dcc.Dropdown(
+                        id="bmc-spec-selector",
+                        options=[], value=None,
+                        placeholder="Select safety spec for BMC...",
+                        style={"fontSize": "11px"},
+                        clearable=True,
+                    ),
+                    html.Div([
+                        html.Button("Run BMC", id="btn-run-bmc",
+                                    n_clicks=0, style=_btn_style("#16a085")),
+                        html.Button("Run All Safety", id="btn-bmc-all",
+                                    n_clicks=0, style=_btn_style("#2980b9")),
+                        html.Button("Clear", id="btn-clear-bmc",
+                                    n_clicks=0, style={
+                                        **_btn_style("#95a5a6"),
+                                        "fontSize": "11px", "padding": "4px 10px",
+                                    }),
+                    ], style={"display": "flex", "gap": "8px", "marginTop": "6px"}),
+                    html.Div(id="bmc-results", style={
+                        "fontSize": "11px", "marginTop": "8px",
+                        "maxHeight": "400px", "overflowY": "auto",
+                    }),
+                ]) if _Z3_AVAILABLE else html.Div([
+                    html.H4("Bounded Model Checking", style={"marginTop": "12px"}),
+                    html.Div("z3-solver not installed. Run: pip install z3-solver",
+                             style={"color": "#888", "fontSize": "11px"}),
                 ]),
             ], className="left-panel"),
 
@@ -475,6 +532,7 @@ def create_app() -> dash.Dash:
         dcc.Store(id="active-trace-store", data=None),
         dcc.Store(id="cycle-result-store", data=None),
         dcc.Store(id="ltl-specs-store", data=None),
+        dcc.Store(id="bmc-result-store", data=None),
     ], style={"fontFamily": "Segoe UI, Arial, sans-serif"})
 
     # ================================================================
@@ -1245,6 +1303,129 @@ def create_app() -> dash.Dash:
             _nuxmv_session.send_command(cmd)
         return no_update
 
+    # ================================================================
+    # BMC CALLBACKS
+    # ================================================================
+
+    if _Z3_AVAILABLE:
+
+        @app.callback(
+            Output("bmc-spec-selector", "options"),
+            Input("parsed-model-store", "data"),
+            State("smv-editor", "value"),
+            prevent_initial_call=True,
+        )
+        def populate_bmc_specs(model_data, text):
+            if not model_data or not text:
+                return []
+            try:
+                model = parse_smv(text)
+                options = []
+                for i, spec in enumerate(model.specs):
+                    if is_safety_spec(spec):
+                        label = spec.text or expr_to_str(spec.expr)
+                        if len(label) > 55:
+                            label = label[:52] + "..."
+                        options.append({
+                            "label": f"[{spec.kind}] {label}",
+                            "value": i,
+                        })
+                return options
+            except Exception:
+                return []
+
+        @app.callback(
+            Output("bmc-results", "children"),
+            Output("bmc-result-store", "data"),
+            Output("state-graph", "elements", allow_duplicate=True),
+            Input("btn-run-bmc", "n_clicks"),
+            State("bmc-spec-selector", "value"),
+            State("bmc-max-k", "value"),
+            State("bmc-timeout", "value"),
+            State("smv-editor", "value"),
+            State("graph-options", "value"),
+            State("state-filter", "value"),
+            State("max-nodes", "value"),
+            prevent_initial_call=True,
+        )
+        def run_bmc_single(n, spec_idx, max_k, timeout, text,
+                           graph_opts, filter_expr, max_nodes):
+            _log_callback("run_bmc_single", {"spec_idx": spec_idx, "max_k": max_k})
+            if not n or spec_idx is None or not text:
+                return no_update, no_update, no_update
+            try:
+                model = parse_smv(text)
+                spec = model.specs[spec_idx]
+                result = run_bmc(model, spec, max_k=max_k or 20,
+                                 timeout_ms=(timeout or 30) * 1000)
+                info = _build_bmc_display([result])
+                graph_elements = no_update
+                if result.violated and result.counterexample:
+                    graph_elements = _overlay_bmc_trace(
+                        result.counterexample, text, graph_opts,
+                        filter_expr, max_nodes,
+                    )
+                return info, None, graph_elements
+            except Exception as e:
+                _log_callback("run_bmc_single", {}, error=str(e))
+                log.exception("Error in run_bmc_single")
+                return (html.Div(f"Error: {e}", style={"color": "#e74c3c"}),
+                        no_update, no_update)
+
+        @app.callback(
+            Output("bmc-results", "children", allow_duplicate=True),
+            Output("bmc-result-store", "data", allow_duplicate=True),
+            Output("state-graph", "elements", allow_duplicate=True),
+            Input("btn-bmc-all", "n_clicks"),
+            State("bmc-max-k", "value"),
+            State("bmc-timeout", "value"),
+            State("smv-editor", "value"),
+            State("graph-options", "value"),
+            State("state-filter", "value"),
+            State("max-nodes", "value"),
+            prevent_initial_call=True,
+        )
+        def run_bmc_all(n, max_k, timeout, text, graph_opts,
+                        filter_expr, max_nodes):
+            _log_callback("run_bmc_all", {"max_k": max_k})
+            if not n or not text:
+                return no_update, no_update, no_update
+            try:
+                model = parse_smv(text)
+                results = run_bmc_all_specs(model, max_k=max_k or 20,
+                                            timeout_ms=(timeout or 30) * 1000)
+                if not results:
+                    return (html.Div("No safety specs found in this model.",
+                                     style={"color": "#888"}),
+                            no_update, no_update)
+                info = _build_bmc_display(results)
+                # Overlay first violated counterexample on graph
+                graph_elements = no_update
+                for r in results:
+                    if r.violated and r.counterexample:
+                        graph_elements = _overlay_bmc_trace(
+                            r.counterexample, text, graph_opts,
+                            filter_expr, max_nodes,
+                        )
+                        break
+                return info, None, graph_elements
+            except Exception as e:
+                _log_callback("run_bmc_all", {}, error=str(e))
+                log.exception("Error in run_bmc_all")
+                return (html.Div(f"Error: {e}", style={"color": "#e74c3c"}),
+                        no_update, no_update)
+
+        @app.callback(
+            Output("bmc-results", "children", allow_duplicate=True),
+            Output("bmc-result-store", "data", allow_duplicate=True),
+            Input("btn-clear-bmc", "n_clicks"),
+            prevent_initial_call=True,
+        )
+        def clear_bmc(n):
+            if not n:
+                return no_update, no_update
+            return "", None
+
     return app
 
 
@@ -1708,3 +1889,162 @@ def _dicts_to_tuples(state_dicts: list[dict], var_names: list[str]) -> list[tupl
     for sd in state_dicts:
         tuples.append(tuple(sd.get(v) for v in var_names))
     return tuples
+
+
+# ================================================================
+# BMC HELPERS
+# ================================================================
+
+def _build_bmc_display(results: list) -> html.Div:
+    """Build Dash HTML for BMC results."""
+    items: list = []
+    n_violated = sum(1 for r in results if r.violated)
+    n_safe = sum(1 for r in results if not r.violated)
+    summary_color = "#27ae60" if n_violated == 0 else "#e74c3c"
+    items.append(html.Div(
+        f"{n_safe}/{len(results)} safety specs hold (up to bound k)",
+        style={"fontWeight": "bold", "marginBottom": "6px", "color": summary_color},
+    ))
+
+    for r in results:
+        # Header
+        icon = "\u2713" if not r.violated else "\u2717"
+        color = "#27ae60" if not r.violated else "#e74c3c"
+        spec_label = r.spec_text
+        if len(spec_label) > 60:
+            spec_label = spec_label[:57] + "..."
+        items.append(html.Div([
+            html.Span(icon, style={"color": color, "fontWeight": "bold",
+                                   "marginRight": "6px"}),
+            html.Span(r.spec_kind, style={
+                "color": "#7f8c8d", "marginRight": "6px",
+                "fontSize": "10px", "fontStyle": "italic",
+            }),
+            html.Span(spec_label),
+        ], style={"padding": "2px 0", "borderBottom": "1px solid #eee"}))
+
+        # Status detail
+        if r.violated:
+            items.append(html.Div(
+                f"  Violated at k={r.violation_k} ({r.total_time_s:.3f}s)",
+                style={"paddingLeft": "20px", "color": "#e74c3c",
+                       "fontSize": "10px"},
+            ))
+        else:
+            items.append(html.Div(
+                f"  No violation found (k=0..{r.max_k}, {r.total_time_s:.3f}s)",
+                style={"paddingLeft": "20px", "color": "#27ae60",
+                       "fontSize": "10px"},
+            ))
+
+        # Counterexample trace table
+        if r.counterexample:
+            var_names = list(r.counterexample[0].keys())
+            header = html.Tr(
+                [html.Th("k", style={"padding": "2px 6px", "fontSize": "10px",
+                                     "borderBottom": "1px solid #ccc"})] +
+                [html.Th(v, style={"padding": "2px 6px", "fontSize": "10px",
+                                   "borderBottom": "1px solid #ccc"})
+                 for v in var_names]
+            )
+            rows = []
+            for step, state in enumerate(r.counterexample):
+                bg = "#fef0ef" if step == len(r.counterexample) - 1 else ""
+                cells = [html.Td(str(step), style={"fontWeight": "bold",
+                                                    "padding": "2px 6px",
+                                                    "fontSize": "10px"})]
+                cells += [
+                    html.Td(str(state.get(v, "?")),
+                            style={"padding": "2px 6px", "fontSize": "10px"})
+                    for v in var_names
+                ]
+                rows.append(html.Tr(cells, style={"backgroundColor": bg}))
+            items.append(html.Div(
+                html.Table([html.Thead(header), html.Tbody(rows)],
+                           style={"borderCollapse": "collapse", "marginTop": "4px"}),
+                style={"maxHeight": "180px", "overflowY": "auto",
+                       "marginLeft": "20px", "marginBottom": "8px"},
+            ))
+
+        # SMT formula inspection (collapsible)
+        if r.formulas:
+            items.append(_build_formula_details(r.formulas))
+
+    return html.Div(items)
+
+
+_FORMULA_PRE_STYLE = {
+    "fontSize": "10px",
+    "fontFamily": "Consolas, monospace",
+    "backgroundColor": "#1e1e1e",
+    "color": "#d4d4d4",
+    "padding": "8px",
+    "borderRadius": "4px",
+    "overflow": "auto",
+    "maxHeight": "250px",
+    "whiteSpace": "pre-wrap",
+    "wordBreak": "break-all",
+    "margin": "4px 0 8px 0",
+}
+
+
+def _build_formula_details(formulas) -> html.Div:
+    """Build SMT formula inspection panel for a BmcResult."""
+    sections = [
+        ("Variable Encoding", formulas.encoding, True),
+        ("I(s_0): Initial State Constraints", formulas.init, False),
+        ("T(s_0, s_1): Transition Relation", formulas.transition, False),
+        ("Bad State (Property Negation)", formulas.property_negation, True),
+        ("Full Solver Assertions", formulas.full_check, False),
+        ("SMT-LIB2 Export", formulas.smt2, False),
+    ]
+    children = []
+    for title, text, default_open in sections:
+        attrs = {"style": {"marginLeft": "4px", "marginBottom": "2px"}}
+        if default_open:
+            attrs["open"] = True
+        children.append(html.Details([
+            html.Summary(title, style={
+                "cursor": "pointer", "fontSize": "10px",
+                "fontWeight": "bold", "color": "#2980b9",
+                "padding": "2px 0",
+                "userSelect": "none",
+            }),
+            html.Pre(text, style=_FORMULA_PRE_STYLE),
+        ], **attrs))
+
+    return html.Div([
+        html.Div("SMT Formulas", style={
+            "fontSize": "11px", "fontWeight": "bold",
+            "color": "#16a085", "padding": "6px 0 4px 0",
+            "borderTop": "2px solid #16a085", "marginTop": "8px",
+        }),
+        html.Div(children),
+    ], style={"marginBottom": "8px"})
+
+
+def _overlay_bmc_trace(counterexample, text, graph_opts,
+                       filter_expr, max_nodes):
+    """Overlay a BMC counterexample trace on the state graph."""
+    cached = _get_cached(text)
+    if not cached:
+        return no_update
+    explicit_result, _, _ = cached
+    reachable_only = "reachable_only" in (graph_opts or [])
+    elements = build_elements(
+        explicit_result,
+        reachable_only=reachable_only,
+        max_nodes=max_nodes or 500,
+        filter_expr=filter_expr or "",
+    )
+    # Convert BMC trace dicts to the format apply_trace_overlay expects
+    trace_states = []
+    for state_dict in counterexample:
+        # Normalize: convert Python values to strings for matching
+        normalized = {k: str(v) for k, v in state_dict.items()}
+        trace_states.append(normalized)
+    elements = apply_trace_overlay(
+        elements, trace_states, explicit_result.state_to_dict,
+        explicit_result.var_names,
+    )
+    return elements

@@ -21,6 +21,10 @@ def _get_parser():
     return _parser
 
 
+# Sentinel used to mark process instance declarations in the VAR section.
+_PROCESS_MARKER = "__PROCESS__"
+
+
 class SmvTransformer(Transformer):
     """Transforms the Lark parse tree into SmvModel dataclasses."""
 
@@ -30,6 +34,13 @@ class SmvTransformer(Transformer):
 
     def INT(self, token):
         return int(token)
+
+    # ---- Module headers ----
+    def param_header(self, args):
+        return (str(args[0]), args[1])  # (name, param_list)
+
+    def simple_header(self, args):
+        return (str(args[0]), [])       # (name, no params)
 
     # ---- Variable types ----
     def bool_type(self, args):
@@ -55,6 +66,17 @@ class SmvTransformer(Transformer):
 
     def ident_bound(self, args):
         return str(args[0])
+
+    def process_type(self, args):
+        """Process instantiation: process ModuleName(arg1, arg2, ...)"""
+        module_name = str(args[0])
+        arg_names = args[1] if len(args) > 1 else []
+        return (_PROCESS_MARKER, module_name, arg_names)
+
+    def process_type_noargs(self, args):
+        """Process instantiation with no arguments: process ModuleName()"""
+        module_name = str(args[0])
+        return (_PROCESS_MARKER, module_name, [])
 
     # ---- Expressions: literals and references ----
     def var_ref(self, args):
@@ -168,7 +190,13 @@ class SmvTransformer(Transformer):
 
     # ---- Variable declarations ----
     def var_decl(self, args):
-        return VarDecl(str(args[0]), args[1])
+        name = str(args[0])
+        type_or_proc = args[1]
+        if isinstance(type_or_proc, tuple) and type_or_proc[0] == _PROCESS_MARKER:
+            # Process instance: return marker tuple
+            _, mod_name, mod_args = type_or_proc
+            return (_PROCESS_MARKER, name, mod_name, mod_args)
+        return VarDecl(name, type_or_proc)
 
     def var_section(self, args):
         return ("VAR", list(args))
@@ -207,33 +235,72 @@ class SmvTransformer(Transformer):
     def spec_default(self, args):
         return ("SPEC", SpecDecl("SPEC", args[0]))
 
-    # ---- Top-level ----
-    def module_decl(self, args):
-        return None
+    # ---- Module ----
+    def module(self, args):
+        """Process a MODULE declaration and its sections into a dict."""
+        header = args[0]   # (name, params) from module_header
+        sections = args[1:]
 
-    def start(self, args):
-        model = SmvModel()
-        for item in args:
+        mod_data = {
+            "name": header[0],
+            "params": header[1],
+            "variables": {},
+            "defines": {},
+            "inits": {},
+            "nexts": {},
+            "fairness": [],
+            "specs": [],
+            "process_instances": [],
+        }
+
+        for item in sections:
             if item is None:
                 continue
             kind = item[0]
             if kind == "VAR":
                 for vd in item[1]:
-                    model.variables[vd.name] = vd
+                    if isinstance(vd, tuple) and vd[0] == _PROCESS_MARKER:
+                        mod_data["process_instances"].append(vd)
+                    else:
+                        mod_data["variables"][vd.name] = vd
             elif kind == "DEFINE":
                 for name, expr in item[1]:
-                    model.defines[name] = expr
+                    mod_data["defines"][name] = expr
             elif kind == "ASSIGN":
                 for a in item[1]:
                     if a[0] == "init":
-                        model.inits[a[1]] = a[2]
+                        mod_data["inits"][a[1]] = a[2]
                     elif a[0] == "next":
-                        model.nexts[a[1]] = a[2]
+                        mod_data["nexts"][a[1]] = a[2]
             elif kind == "FAIRNESS":
-                model.fairness.append(item[1])
+                mod_data["fairness"].append(item[1])
             elif kind == "SPEC":
-                model.specs.append(item[1])
-        return model
+                mod_data["specs"].append(item[1])
+
+        return mod_data
+
+    # ---- Top-level ----
+    def start(self, args):
+        modules = [m for m in args if m is not None]
+
+        # Check if any module has process instances
+        has_processes = any(m["process_instances"] for m in modules)
+
+        if not has_processes and len(modules) == 1:
+            # Single module, no processes: build SmvModel directly (fast path)
+            mod = modules[0]
+            model = SmvModel()
+            model.variables = mod["variables"]
+            model.defines = mod["defines"]
+            model.inits = mod["inits"]
+            model.nexts = mod["nexts"]
+            model.fairness = mod["fairness"]
+            model.specs = mod["specs"]
+            return model
+
+        # Multi-module or has process instances: flatten
+        from smvis.smv_flattener import flatten_modules
+        return flatten_modules(modules)
 
 
 _transformer = SmvTransformer()
