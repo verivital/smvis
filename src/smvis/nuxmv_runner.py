@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -13,11 +14,34 @@ import logging
 
 log = logging.getLogger("smvis.nuxmv")
 
-# Locate the nuXmv binary relative to this package
-_NUXMV_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "bin", "nuxmv", "nuXmv.exe",
-)
+def _resolve_nuxmv_path() -> str:
+    """Locate the nuXmv binary.
+
+    Resolution order:
+      1. ``SMVIS_NUXMV_PATH`` env var (explicit override, used in Docker/Cloud Run)
+      2. Bundled binary under ``<repo>/bin/nuxmv/`` — ``nuXmv.exe`` on Windows,
+         ``nuXmv`` elsewhere (Linux/macOS)
+      3. ``nuXmv``/``nuxmv`` found on ``PATH``
+      4. The expected bundled path (so "not found" errors stay meaningful)
+    """
+    override = os.environ.get("SMVIS_NUXMV_PATH")
+    if override:
+        return override
+    repo_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+    binary_name = "nuXmv.exe" if os.name == "nt" else "nuXmv"
+    bundled = os.path.join(repo_root, "bin", "nuxmv", binary_name)
+    if os.path.isfile(bundled):
+        return bundled
+    on_path = shutil.which("nuXmv") or shutil.which("nuxmv")
+    if on_path:
+        return on_path
+    return bundled
+
+
+# Locate the nuXmv binary (Windows .exe locally, Linux binary in the container)
+_NUXMV_PATH = _resolve_nuxmv_path()
 
 
 def nuxmv_available() -> bool:

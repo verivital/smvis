@@ -1,0 +1,39 @@
+# Controls what `gcloud run deploy --source .` uploads to Cloud Build.
+# The Dockerfile, the nuXmv tarball, src/, examples/, and pyproject.toml MUST be
+# uploaded, so they are intentionally NOT listed here.
+
+.git/
+.gitignore
+.gitattributes
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Tests and dev-only files
+tests/
+requirements-dev.txt
+setup_env.py
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Windows-only binary (image uses the Linux binary from the .tar.xz)
+bin/nuxmv/nuXmv.exe
+
+# Editors / docs
+.vscode/
+.idea/
+DEPLOY.md
+CLAUDE.md

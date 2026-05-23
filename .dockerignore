@@ -1,0 +1,38 @@
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Tests and dev-only files (not needed at runtime)
+tests/
+requirements-dev.txt
+setup_env.py
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# The Windows nuXmv binary — the image uses the Linux one extracted from the tarball.
+# (Do NOT ignore the .tar.xz: the build extracts the Linux binary from it.)
+bin/nuxmv/nuXmv.exe
+
+# VCS / editors
+.git/
+.gitignore
+.gitattributes
+.vscode/
+.idea/
+
+# Docs not needed inside the image
+DEPLOY.md
+CLAUDE.md
+README*.md

@@ -20,6 +20,9 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
 ]
+deploy = [
+    "gunicorn>=21",
+]
 
 [project.scripts]
 smvis = "smvis.__main__:main"
