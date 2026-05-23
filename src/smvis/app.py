@@ -1,5 +1,6 @@
 """Dash web application for the smvis Model Visualizer."""
 from __future__ import annotations
+import base64
 import hashlib
 import os
 import json
@@ -180,7 +181,16 @@ def create_app() -> dash.Dash:
                         dcc.Download(id="download-smv"),
                         html.Button("Save", id="btn-save", n_clicks=0,
                                     style=_btn_style("#8e44ad")),
-                    ], style={"display": "flex", "gap": "8px", "marginTop": "8px"}),
+                        dcc.Upload(
+                            id="upload-smv",
+                            children=html.Button("⬆ Upload .smv",
+                                                  style=_btn_style("#e67e22")),
+                            accept=".smv,text/plain",
+                            multiple=False,
+                            style={"display": "inline-block"},
+                        ),
+                    ], style={"display": "flex", "gap": "8px", "marginTop": "8px",
+                              "flexWrap": "wrap", "alignItems": "center"}),
                     html.Div(id="parse-status", style={
                         "marginTop": "8px", "padding": "6px",
                         "fontSize": "12px", "maxHeight": "80px", "overflow": "auto",
@@ -547,6 +557,32 @@ def create_app() -> dash.Dash:
         if not filename:
             return no_update
         return _load_model_text(filename)
+
+    @app.callback(
+        Output("smv-editor", "value", allow_duplicate=True),
+        Output("parse-status", "children", allow_duplicate=True),
+        Output("parse-status", "style", allow_duplicate=True),
+        Input("upload-smv", "contents"),
+        State("upload-smv", "filename"),
+        prevent_initial_call=True,
+    )
+    def load_uploaded_model(contents, filename):
+        """Load a student-uploaded .smv file into the editor (per browser session).
+
+        Decodes the base64 data-URI dcc.Upload provides and drops the text into
+        the editor. Intentionally does not write to disk: on the shared single
+        instance that would mix every student's uploads into one dropdown.
+        """
+        if not contents:
+            return no_update, no_update, no_update
+        try:
+            _header, b64 = contents.split(",", 1)
+            text = base64.b64decode(b64).decode("utf-8", errors="replace")
+        except Exception as e:
+            return no_update, f"Upload failed: {e}", _status_style(False)
+        name = filename or "uploaded.smv"
+        msg = f"Loaded '{name}' into the editor — click Parse or Compute All."
+        return text, msg, _status_style(True)
 
     @app.callback(
         Output("download-smv", "data"),
